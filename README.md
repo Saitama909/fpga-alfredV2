@@ -1,6 +1,6 @@
 # fpga-alfredV2
 
-## Project Overview: Accelerating Approximate Nearest Neighbour Search (ANNS)
+## Project Overview: Number Theoretic Transform (NTT) Core Acceleration for PQC
 See [COMP4601 Initial Project Plan](https://github.com/Saitama909/fpga-alfredV2/blob/main/COMP4601%20Initial%20Project%20Plan-1.pdf)
 
 ## Repository
