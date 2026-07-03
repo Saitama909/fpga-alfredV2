@@ -17,3 +17,5 @@ For any inquiries, project updates, or further information, please contact our t
 * **Contact:** Aditya Muthukattu
 * **Email:** a.muthukattu@student.unsw.edu.au
 
+## Project Updates
+See [UPDATES.md](https://github.com/Saitama909/fpga-alfredV2/blob/main/updates.md)
