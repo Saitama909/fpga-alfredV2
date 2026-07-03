@@ -16,3 +16,6 @@ The development and source code for this project are maintained here: https://gi
 For any inquiries, project updates, or further information, please contact our team representative:
 * **Contact:** Aditya Muthukattu
 * **Email:** a.muthukattu@student.unsw.edu.au
+
+## Changelog
+03/07/2026 - Added initial project plan presentation PDF.
