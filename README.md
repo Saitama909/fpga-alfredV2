@@ -17,5 +17,3 @@ For any inquiries, project updates, or further information, please contact our t
 * **Contact:** Aditya Muthukattu
 * **Email:** a.muthukattu@student.unsw.edu.au
 
-## Changelog
-03/07/2026 - Added initial project plan presentation PDF.
