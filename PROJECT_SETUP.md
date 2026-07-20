@@ -15,3 +15,17 @@ gcc -E . hls/src/ntt_top.cpp
 5. Run simulaiton. Verify that it passes.
 6. Run synthesis
 
+
+
+# Notes on optimisation
+1. Streamline memory operation
+2. Mental model of data dependancies and inter interation dependancies
+3. optimise fqmul and reductions
+4. 12 bit types instead of 16
+
+
+find a good 256 point hardware fft for inspiration of how fine grained we can break down the main compute loop
+
+At a certain point hls tasks let you pass data back up the call chain.
+
+Sort of like threads
