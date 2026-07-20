@@ -23,7 +23,7 @@ int main() {
 
   for (int i = 0; i < 256; i++) {
     orig[i] = i-128;  // center_mod_q(rand() % KYBER_Q);
-    work[i] = orig[i]+1;
+    work[i] = orig[i];
   }
 
   ntt(work);
