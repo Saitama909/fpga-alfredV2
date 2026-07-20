@@ -19,13 +19,14 @@ gcc -E . hls/src/ntt_top.cpp
 
 # Notes on optimisation
 1. Streamline memory operation
+    - [x] local r array
 2. Mental model of data dependancies and inter interation dependancies
 3. optimise fqmul and reductions
 4. 12 bit types instead of 16
 
 
 find a good 256 point hardware fft for inspiration of how fine grained we can break down the main compute loop
-
+we don't have to fft in place
 At a certain point hls tasks let you pass data back up the call chain.
-
 Sort of like threads
+
