@@ -82,7 +82,8 @@ void ntt(int16_t r[256]) {
   unsigned int len, start, j, k;
   int16_t t, zeta;
 
-  int16_t local_r[256], temp_r[256];
+  int16_t local_r[256];
+  // #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
   
   copy_r: for (int i = 0; i < 256; i += 1) {
 		local_r[i] = r[i];
@@ -91,9 +92,14 @@ void ntt(int16_t r[256]) {
 
   k = 1;
   for(len = 128; len >= 2; len >>= 1) {
-    for(start = 0; start < 256; start = j + len) {
+    // #pragma HLS LOOP_TRIPCOUNT min=7 max=7
+    for(start = 0; start < 256; start += (len << 1)) {
+      // #pragma HLS LOOP_TRIPCOUNT min=1 max=64
       zeta = zetas[k++];
       for(j = start; j < start + len; j++) {
+        // #pragma HLS PIPELINE II=1
+        // #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
+        // #pragma HLS LOOP_TRIPCOUNT min=2 max=128
         t = fqmul(zeta, local_r[j + len]);
         local_r[j + len] = local_r[j] - t;
         local_r[j] = local_r[j] + t;
