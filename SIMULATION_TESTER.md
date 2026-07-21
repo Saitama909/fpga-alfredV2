@@ -1,6 +1,9 @@
 # Simulation Tester
 
+## Kill Vitis if its acting naughty
+```pkill -9 -f 'vitis-ide|vitis-server|/Vitis/'```
 
+---
 
 `simulation_tester.py` drives a **Unified Vitis** HLS component headlessly:
 
@@ -90,7 +93,7 @@ Default behaviour:
 | C-sim | Runs; must PASS before synthesis |
 | C-synth | Runs after a passing sim |
 | Console | Prints **Timing summary** + **Latency summary** only |
-| Disk | Writes full tables to `results/results-<UNIX_TIMESTAMP>.txt` |
+| Disk | Writes full tables to `results/results-<UNIX_TIMESTAMP>.md` |
 
 While tools are running, the console updates a single line:
 
@@ -145,7 +148,7 @@ Useful as a quick smoke test after changing HLS source or Vitis config.
 
 | Command | Console | Save file |
 |---------|---------|-----------|
-| `python3 simulation_tester.py` | summaries | yes (`results/results-<ts>.txt`) |
+| `python3 simulation_tester.py` | summaries | yes (`results/results-<ts>.md`) |
 | `python3 simulation_tester.py --console-print` | summaries + full tables | yes |
 | `python3 simulation_tester.py --no-save` | summaries | no |
 | `python3 simulation_tester.py --console-print --no-save` | summaries + full tables | no |
@@ -160,17 +163,17 @@ Useful as a quick smoke test after changing HLS source or Vitis config.
 Unless `--no-save` or `--dry-run` is set, the script creates:
 
 ```text
-results/results-<UNIX_TIMESTAMP>.txt
+results/results-<UNIX_TIMESTAMP>.md
 ```
 
-Example: `results/results-1753080000.txt`
+Example: `results/results-1753080000.md`
 
-The file contains:
+The markdown file includes:
 
 1. A short header (timestamp + report paths)
-2. Timing Estimates
-3. Latency Estimates (cycles, including detail)
-4. Performance & Resource Estimates
+2. A **headline metrics** table (max/min latency cycles, clock, BRAM/DSP/FF/LUT when parseable)
+3. Timing / latency summaries and full tables as **proper markdown tables**
+4. Performance & Resource Estimates as markdown tables
 
 The `results/` folder is created automatically next to `simulation_tester.py` (repo root).
 

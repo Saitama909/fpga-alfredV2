@@ -80,10 +80,15 @@ static int16_t fqmul(int16_t a, int16_t b) {
 
 void ntt(int16_t r[256]) {
   unsigned int len, start, j, k;
-  int16_t t, zeta;
+  int16_t zeta;
+
+  // How many butterflies to issue in parallel each pipeline beat.
+  // len is always a power of two in {2..128}, so a factor of 4 works for every stage (the len==2 stage simply masks off unused lanes).
+  // PARALLEL = 4 seems to work the best for the 768 bit version of the NTT. - Riley
+  const unsigned int PARALLEL = 4;
 
   int16_t local_r[256];
-  // #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
   
   copy_r: for (int i = 0; i < 256; i += 1) {
 		local_r[i] = r[i];
@@ -91,18 +96,26 @@ void ntt(int16_t r[256]) {
   
 
   k = 1;
-  for(len = 128; len >= 2; len >>= 1) {
-    // #pragma HLS LOOP_TRIPCOUNT min=7 max=7
-    for(start = 0; start < 256; start += (len << 1)) {
-      // #pragma HLS LOOP_TRIPCOUNT min=1 max=64
+  stage_loop: for(len = 128; len >= 2; len >>= 1) {
+    #pragma HLS LOOP_TRIPCOUNT min=7 max=7
+    group_loop: for(start = 0; start < 256; start += (len << 1)) {
+      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
       zeta = zetas[k++];
-      for(j = start; j < start + len; j++) {
-        // #pragma HLS PIPELINE II=1
-        // #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
-        // #pragma HLS LOOP_TRIPCOUNT min=2 max=128
-        t = fqmul(zeta, local_r[j + len]);
-        local_r[j + len] = local_r[j] - t;
-        local_r[j] = local_r[j] + t;
+      // Step by PARALLEL and fully unroll the inner lane loop so HLS can
+      // schedule multiple fqmul/add/sub butterflies per cycle.
+      butterfly_loop: for(j = start; j < start + len; j += PARALLEL) {
+        #pragma HLS PIPELINE II=1
+        #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
+        #pragma HLS LOOP_TRIPCOUNT min=1 max=32
+        for (unsigned int p = 0; p < PARALLEL; p++) {
+          #pragma HLS UNROLL
+          if (j + p < start + len) {
+            const unsigned int jj = j + p;
+            const int16_t t = fqmul(zeta, local_r[jj + len]);
+            local_r[jj + len] = local_r[jj] - t;
+            local_r[jj] = local_r[jj] + t;
+          }
+        }
       }
     }
   }

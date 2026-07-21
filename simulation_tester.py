@@ -98,7 +98,7 @@ def parse_args(argv: list[str] | None = None) -> CliOptions:
     parser.add_argument(
         "--no-save",
         action="store_true",
-        help="Do not write a results-TIMESTAMP.txt file under results/.",
+        help="Do not write a results-TIMESTAMP.md file under results/.",
     )
     parser.add_argument(
         "--dry-run",
@@ -258,6 +258,186 @@ def extract_section(text: str, header_regex: str, stop_regex: str) -> str | None
     return text[start:end].rstrip() + "\n"
 
 
+def _is_table_border(line: str) -> bool:
+    s = line.strip()
+    return bool(s) and s.startswith("+") and set(s) <= set("+-")
+
+
+def _is_table_row(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|") and len(s) > 1
+
+
+def _split_table_row(line: str) -> list[str]:
+    # Keep empty cells; drop the blank entries from leading/trailing '|'.
+    return [cell.strip() for cell in line.strip().split("|")[1:-1]]
+
+
+def _unique_headers(headers: list[str]) -> list[str]:
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for raw in headers:
+        base = raw if raw else "col"
+        n = seen.get(base, 0)
+        seen[base] = n + 1
+        out.append(base if n == 0 else f"{base} ({n + 1})")
+    return out
+
+
+def _friendly_headers(headers: list[str]) -> list[str]:
+    """Rename common HLS duplicate min/max header patterns."""
+    # Latency summary: min max min max min max Type
+    if len(headers) == 7 and [h.lower() for h in headers[:6]] == [
+        "min",
+        "max",
+        "min",
+        "max",
+        "min",
+        "max",
+    ]:
+        return [
+            "Latency min (cycles)",
+            "Latency max (cycles)",
+            "Absolute min",
+            "Absolute max",
+            "Interval min",
+            "Interval max",
+            headers[6] or "Pipeline",
+        ]
+
+    # Instance detail: Instance Module min max min max min max Type
+    if (
+        len(headers) == 9
+        and headers[0].lower() == "instance"
+        and headers[1].lower() == "module"
+    ):
+        return [
+            "Instance",
+            "Module",
+            "Latency min (cycles)",
+            "Latency max (cycles)",
+            "Absolute min",
+            "Absolute max",
+            "Interval min",
+            "Interval max",
+            headers[8] or "Pipeline",
+        ]
+
+    # Loop detail often already has decent names after merge.
+    return _unique_headers(headers)
+
+
+def _merge_header_rows(header_rows: list[list[str]]) -> list[str]:
+    """Combine multi-line HLS headers when column counts match; else use last row."""
+    if not header_rows:
+        return []
+    if len(header_rows) == 1:
+        return _friendly_headers(header_rows[0])
+
+    widths = [len(r) for r in header_rows]
+    # Perf-style tables often differ by a trailing empty cell (14 vs 15).
+    # Latency-style tables use a short spanning header (4) above a fine header (7)
+    # — those must NOT be zip-merged or columns misalign.
+    if max(widths) - min(widths) <= 1:
+        width = max(widths)
+        padded = [r + [""] * (width - len(r)) for r in header_rows]
+        merged: list[str] = []
+        for col in zip(*padded):
+            parts = [c for c in col if c]
+            deduped: list[str] = []
+            for part in parts:
+                if not deduped or deduped[-1] != part:
+                    deduped.append(part)
+            merged.append(" ".join(deduped) if deduped else "")
+        return _friendly_headers(merged)
+
+    return _friendly_headers(header_rows[-1])
+
+
+def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    if not headers:
+        return ""
+    width = len(headers)
+    normalised: list[list[str]] = []
+    for row in rows:
+        cells = list(row[:width]) + [""] * max(0, width - len(row))
+        # Escape pipes so markdown stays intact.
+        normalised.append([c.replace("|", "\\|") for c in cells])
+    header_cells = [h.replace("|", "\\|") for h in headers]
+
+    lines = [
+        "| " + " | ".join(header_cells) + " |",
+        "| " + " | ".join("---" for _ in header_cells) + " |",
+    ]
+    for row in normalised:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def hls_ascii_to_markdown(text: str) -> str:
+    """Convert HLS report ASCII tables in a section into GitHub-flavoured markdown tables."""
+    if not text or not text.strip():
+        return "_Missing from synthesis report._"
+
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _is_table_border(line):
+            # Parse one ASCII table: border, header rows, border, data rows, border.
+            i += 1
+            header_rows: list[list[str]] = []
+            while i < len(lines) and _is_table_row(lines[i]):
+                header_rows.append(_split_table_row(lines[i]))
+                i += 1
+            if i < len(lines) and _is_table_border(lines[i]):
+                i += 1
+            data_rows: list[list[str]] = []
+            while i < len(lines) and _is_table_row(lines[i]):
+                data_rows.append(_split_table_row(lines[i]))
+                i += 1
+            if i < len(lines) and _is_table_border(lines[i]):
+                i += 1
+
+            headers = _merge_header_rows(header_rows)
+            if headers and data_rows:
+                out.append(_markdown_table(headers, data_rows))
+                out.append("")
+            elif headers:
+                # Header-only table — still emit headers with no body.
+                out.append(_markdown_table(headers, []))
+                out.append("")
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            if out and out[-1] != "":
+                out.append("")
+            i += 1
+            continue
+
+        # Section labels from the report (* Summary:, + Detail:, etc.).
+        if stripped.startswith("+") or stripped.startswith("*"):
+            label = stripped.lstrip("+* ").rstrip(":")
+            out.append(f"**{label}**")
+            out.append("")
+        elif stripped.startswith("Name Prefix:"):
+            out.append(f"_{stripped}_")
+            out.append("")
+        else:
+            out.append(stripped)
+        i += 1
+
+    # Collapse excessive blank lines.
+    cleaned: list[str] = []
+    for line in out:
+        if line == "" and cleaned and cleaned[-1] == "":
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).rstrip() + "\n"
+
+
 def wait_for_reports(work_dir: Path) -> None:
     ready = False
     for _ in range(30):
@@ -289,16 +469,103 @@ class QoRTables:
     latency_full: str | None
     perf_res: str | None
 
-    def full_text(self) -> str:
-        parts: list[str] = []
-        parts.append("=== Estimated Quality of Results ===\n")
-        parts.append("--- Timing Estimates ---\n")
-        parts.append((self.timing_full or self.timing_summary or "(missing)") + "\n")
-        parts.append("--- Latency Estimates (cycles) ---\n")
-        parts.append((self.latency_full or self.latency_summary or "(missing)") + "\n")
-        parts.append("--- Performance & Resource Estimates ---\n")
-        parts.append((self.perf_res or "(missing)") + "\n")
-        return "\n".join(parts)
+    def headline_metrics(self) -> dict[str, str]:
+        """Best-effort parse of key numbers for the markdown summary table."""
+        metrics: dict[str, str] = {}
+        src = self.latency_summary or self.latency_full or ""
+        # Latency summary data row: | min | max | abs_min | abs_max | iv_min | iv_max | type |
+        lat = re.search(
+            r"\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([0-9.]+\s*\w+)\s*\|\s*([0-9.]+\s*\w+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|",
+            src,
+        )
+        if lat:
+            metrics["latency_min_cycles"] = lat.group(1)
+            metrics["latency_max_cycles"] = lat.group(2)
+            metrics["latency_min_time"] = lat.group(3)
+            metrics["latency_max_time"] = lat.group(4)
+            metrics["interval_min"] = lat.group(5)
+            metrics["interval_max"] = lat.group(6)
+
+        timing = self.timing_summary or self.timing_full or ""
+        clk = re.search(
+            r"\|\s*ap_clk\s*\|\s*([0-9.]+)\s*ns\s*\|\s*([0-9.]+)\s*ns\s*\|\s*([0-9.]+)\s*ns\s*\|",
+            timing,
+        )
+        if clk:
+            metrics["clock_target_ns"] = clk.group(1)
+            metrics["clock_estimated_ns"] = clk.group(2)
+            metrics["clock_uncertainty_ns"] = clk.group(3)
+
+        perf = self.perf_res or ""
+        top = re.search(
+            r"\|\+\s*pqcrystals_kyber768_ref_ntt\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*(\d+)\s*\|[^|]*\|[^|]*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            perf,
+        )
+        if top:
+            metrics["top_latency_cycles"] = top.group(1).strip()
+            metrics["bram"] = top.group(2).strip()
+            metrics["dsp"] = top.group(3).strip()
+            metrics["ff"] = top.group(4).strip()
+            metrics["lut"] = top.group(5).strip()
+        return metrics
+
+    def as_markdown(self) -> str:
+        ts = int(time.time())
+        metrics = self.headline_metrics()
+        lines: list[str] = [
+            "# Vitis HLS QoR Results",
+            "",
+            f"Generated (unix timestamp): `{ts}`",
+            "",
+            "## Source reports",
+            "",
+            f"- **Top report:** `{self.top_report}`",
+        ]
+        if self.summary_report is not None:
+            lines.append(f"- **Summary report:** `{self.summary_report}`")
+        lines.append("")
+
+        lines.extend(["## Headline metrics", ""])
+        if metrics:
+            lines.append("| Metric | Value |")
+            lines.append("| --- | --- |")
+            label_map = [
+                ("latency_max_cycles", "Max latency (cycles)"),
+                ("latency_min_cycles", "Min latency (cycles)"),
+                ("latency_max_time", "Max latency (absolute, from report)"),
+                ("latency_min_time", "Min latency (absolute, from report)"),
+                ("interval_max", "Max initiation interval"),
+                ("interval_min", "Min initiation interval"),
+                ("clock_target_ns", "Clock target (ns)"),
+                ("clock_estimated_ns", "Clock estimated (ns)"),
+                ("clock_uncertainty_ns", "Clock uncertainty (ns)"),
+                ("bram", "BRAM"),
+                ("dsp", "DSP"),
+                ("ff", "FF"),
+                ("lut", "LUT"),
+            ]
+            for key, label in label_map:
+                if key in metrics:
+                    lines.append(f"| {label} | `{metrics[key]}` |")
+        else:
+            lines.append("_Could not parse headline metrics from the report tables._")
+        lines.append("")
+
+        def add_section(title: str, body: str | None) -> None:
+            lines.append(f"## {title}")
+            lines.append("")
+            if body and body.strip():
+                lines.append(hls_ascii_to_markdown(body).rstrip())
+            else:
+                lines.append("_Missing from synthesis report._")
+            lines.append("")
+
+        add_section("Timing summary", self.timing_summary)
+        add_section("Latency summary (cycles)", self.latency_summary)
+        add_section("Timing estimates (full)", self.timing_full)
+        add_section("Latency estimates (full, cycles)", self.latency_full)
+        add_section("Performance & resource estimates", self.perf_res)
+        return "\n".join(lines) + "\n"
 
 
 def collect_qor_tables(work_dir: Path) -> QoRTables:
@@ -388,15 +655,8 @@ def print_console_qor(qor: QoRTables, console_print: bool) -> None:
 
 def save_results(qor: QoRTables) -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"results-{int(time.time())}.txt"
-    header = (
-        f"Vitis HLS QoR snapshot\n"
-        f"generated_unix: {int(time.time())}\n"
-        f"top_report: {qor.top_report}\n"
-        f"summary_report: {qor.summary_report}\n"
-        f"{'-' * 72}\n\n"
-    )
-    out_path.write_text(header + qor.full_text(), encoding="utf-8")
+    out_path = RESULTS_DIR / f"results-{int(time.time())}.md"
+    out_path.write_text(qor.as_markdown(), encoding="utf-8")
     return out_path
 
 
