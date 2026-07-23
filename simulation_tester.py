@@ -68,6 +68,7 @@ class CliOptions:
     console_print: bool
     no_save: bool
     dry_run: bool
+    jobs: int
 
     @property
     def should_save(self) -> bool:
@@ -80,6 +81,7 @@ class CliOptions:
 
 
 def parse_args(argv: list[str] | None = None) -> CliOptions:
+    default_jobs = os.cpu_count() or 1
     parser = argparse.ArgumentParser(
         description=(
             "Run Vitis HLS C simulation and C synthesis against a Unified Vitis "
@@ -108,11 +110,26 @@ def parse_args(argv: list[str] | None = None) -> CliOptions:
             "Skips report parsing and does not save results."
         ),
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=default_jobs,
+        metavar="N",
+        help=(
+            "Parallel job/thread hint for Vitis HLS (passed as --hls.jobs and "
+            f"XILINX_NUM_THREADS). Default: {default_jobs} (this machine's CPU count). "
+            "C-synth is still often mostly single-threaded; this helps where the "
+            "tools can parallelise."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.jobs < 1:
+        parser.error("--jobs must be >= 1")
     return CliOptions(
         console_print=args.console_print,
         no_save=args.no_save,
         dry_run=args.dry_run,
+        jobs=args.jobs,
     )
 
 
@@ -154,10 +171,19 @@ def load_component_paths(workspace: Path, component: str) -> tuple[Path, Path]:
     return cfg, work_dir
 
 
-def run_with_timer(cmd: list[str], cwd: Path, label: str) -> subprocess.CompletedProcess:
-    """Run a command, rewriting one console line with elapsed seconds."""
+def run_streaming(
+    cmd: list[str],
+    cwd: Path,
+    label: str,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a command, streaming its stdout/stderr live to this console."""
     print(colour(f"$ {' '.join(cmd)}", DIM))
     start = time.time()
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    if extra_env:
+        env.update(extra_env)
+    # Merge stderr into stdout so warnings/errors appear in order with the log.
     proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
@@ -165,38 +191,18 @@ def run_with_timer(cmd: list[str], cwd: Path, label: str) -> subprocess.Complete
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env,
     )
     assert proc.stdout is not None
     output_lines: list[str] = []
-    last_printed = -1
 
-    while True:
-        line = proc.stdout.readline()
-        if line:
-            output_lines.append(line.rstrip("\n"))
-        elif proc.poll() is not None:
-            break
-
-        elapsed = int(time.time() - start)
-        if elapsed != last_printed:
-            last_printed = elapsed
-            msg = f"working on it {elapsed:02d}"
-            if sys.stdout.isatty():
-                sys.stdout.write(f"\r{colour(msg, YELLOW)}\033[K")
-                sys.stdout.flush()
-            else:
-                if elapsed == 0 or elapsed % 10 == 0:
-                    print(msg)
-
-    rest = proc.stdout.read()
-    if rest:
-        output_lines.extend(rest.splitlines())
+    for line in proc.stdout:
+        text = line.rstrip("\n")
+        output_lines.append(text)
+        print(text, flush=True)
 
     proc.wait()
     elapsed = int(time.time() - start)
-    if sys.stdout.isatty():
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
     print(colour(f"finished {label} in {elapsed}s (exit {proc.returncode})", DIM))
 
     return subprocess.CompletedProcess(
@@ -468,6 +474,7 @@ class QoRTables:
     timing_full: str | None
     latency_full: str | None
     perf_res: str | None
+    utilization_summary: str | None
 
     def headline_metrics(self) -> dict[str, str]:
         """Best-effort parse of key numbers for the markdown summary table."""
@@ -496,18 +503,88 @@ class QoRTables:
             metrics["clock_estimated_ns"] = clk.group(2)
             metrics["clock_uncertainty_ns"] = clk.group(3)
 
-        perf = self.perf_res or ""
-        top = re.search(
-            r"\|\+\s*pqcrystals_kyber768_ref_ntt\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*(\d+)\s*\|[^|]*\|[^|]*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
-            perf,
+        util = self.utilization_summary or ""
+        total = re.search(
+            r"\|\s*Total\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            util,
         )
-        if top:
-            metrics["top_latency_cycles"] = top.group(1).strip()
-            metrics["bram"] = top.group(2).strip()
-            metrics["dsp"] = top.group(3).strip()
-            metrics["ff"] = top.group(4).strip()
-            metrics["lut"] = top.group(5).strip()
+        available = re.search(
+            r"\|\s*Available\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            util,
+        )
+        pct = re.search(
+            r"\|\s*Utilization\s*\(%\)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            util,
+        )
+        if total and available and pct:
+            metrics["bram"] = f"{total.group(1).strip()} / {available.group(1).strip()} ({pct.group(1).strip()}%)"
+            metrics["dsp"] = f"{total.group(2).strip()} / {available.group(2).strip()} ({pct.group(2).strip()}%)"
+            metrics["ff"] = f"{total.group(3).strip()} / {available.group(3).strip()} ({pct.group(3).strip()}%)"
+            metrics["lut"] = f"{total.group(4).strip()} / {available.group(4).strip()} ({pct.group(4).strip()}%)"
+            metrics["uram"] = f"{total.group(5).strip()} / {available.group(5).strip()} ({pct.group(5).strip()}%)"
+            metrics["lut_pct"] = pct.group(4).strip().lstrip("~")
+        else:
+            # Fallback: top row of Performance & Resource Estimates.
+            perf = self.perf_res or ""
+            top = re.search(
+                r"\|\+\s*pqcrystals_kyber768_ref_ntt\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*(\d+)\s*\|[^|]*\|[^|]*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+                perf,
+            )
+            if top:
+                metrics["top_latency_cycles"] = top.group(1).strip()
+                metrics["bram"] = top.group(2).strip()
+                metrics["dsp"] = top.group(3).strip()
+                metrics["ff"] = top.group(4).strip()
+                metrics["lut"] = top.group(5).strip()
+                m = re.search(r"\((\d+)%\)", metrics["lut"])
+                if m:
+                    metrics["lut_pct"] = m.group(1)
         return metrics
+
+    def resource_usage_text(self) -> str:
+        """Compact top-level resource table as plain aligned text."""
+        util = self.utilization_summary or ""
+        total = re.search(
+            r"\|\s*Total\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            util,
+        )
+        available = re.search(
+            r"\|\s*Available\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            util,
+        )
+        pct = re.search(
+            r"\|\s*Utilization\s*\(%\)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+            util,
+        )
+        if total and available and pct:
+            rows = []
+            for i, name in enumerate(("BRAM", "DSP", "FF", "LUT", "URAM"), start=1):
+                rows.append([
+                    name,
+                    total.group(i).strip(),
+                    available.group(i).strip(),
+                    pct.group(i).strip(),
+                ])
+            return aligned_table_text(
+                ["Resource", "Total", "Available", "Utilization (%)"],
+                rows,
+            )
+
+        metrics = self.headline_metrics()
+        if not any(k in metrics for k in ("bram", "dsp", "ff", "lut")):
+            return "Missing top-level resource usage from synthesis report.\n"
+
+        rows = []
+        for key, label in (
+            ("bram", "BRAM"),
+            ("dsp", "DSP"),
+            ("ff", "FF"),
+            ("lut", "LUT"),
+            ("uram", "URAM"),
+        ):
+            if key in metrics:
+                rows.append([label, metrics[key]])
+        return aligned_table_text(["Resource", "Usage"], rows)
 
     def as_markdown(self) -> str:
         ts = int(time.time())
@@ -527,8 +604,6 @@ class QoRTables:
 
         lines.extend(["## Headline metrics", ""])
         if metrics:
-            lines.append("| Metric | Value |")
-            lines.append("| --- | --- |")
             label_map = [
                 ("latency_max_cycles", "Max latency (cycles)"),
                 ("latency_min_cycles", "Min latency (cycles)"),
@@ -543,19 +618,26 @@ class QoRTables:
                 ("dsp", "DSP"),
                 ("ff", "FF"),
                 ("lut", "LUT"),
+                ("uram", "URAM"),
             ]
-            for key, label in label_map:
-                if key in metrics:
-                    lines.append(f"| {label} | `{metrics[key]}` |")
+            rows = [[label, metrics[key]] for key, label in label_map if key in metrics]
+            lines.append(fence(aligned_table_text(["Metric", "Value"], rows)).rstrip())
         else:
             lines.append("_Could not parse headline metrics from the report tables._")
+        lines.append("")
+
+        lines.append("## Resource usage summary (top-level)")
+        lines.append("")
+        lines.append(fence(self.resource_usage_text()).rstrip())
         lines.append("")
 
         def add_section(title: str, body: str | None) -> None:
             lines.append(f"## {title}")
             lines.append("")
             if body and body.strip():
-                lines.append(hls_ascii_to_markdown(body).rstrip())
+                # Keep original HLS ASCII tables in a code block so wide
+                # columns are not squashed by markdown table rendering.
+                lines.append(fence(body).rstrip())
             else:
                 lines.append("_Missing from synthesis report._")
             lines.append("")
@@ -600,6 +682,21 @@ def collect_qor_tables(work_dir: Path) -> QoRTables:
         r"^={3,}\s*$|^II Violation",
     )
 
+    # Top-level Utilization Estimates summary (Total / Available / %).
+    # Stop on the next named '== Section' header, not on '====' underlines.
+    util_block = extract_section(
+        top_text,
+        r"^== Utilization Estimates\s*$",
+        r"^== [A-Za-z]",
+    )
+    utilization_summary = None
+    if util_block:
+        utilization_summary = extract_section(
+            util_block,
+            r"^\* Summary:\s*$",
+            r"^\s*\+ Detail:\s*$|^== [A-Za-z]",
+        )
+
     return QoRTables(
         top_report=top_report,
         summary_report=summary_path if summary_path.is_file() else None,
@@ -608,8 +705,37 @@ def collect_qor_tables(work_dir: Path) -> QoRTables:
         timing_full=timing_full,
         latency_full=latency_full,
         perf_res=perf_res,
+        utilization_summary=utilization_summary,
     )
 
+
+def aligned_table_text(headers: list[str], rows: list[list[str]]) -> str:
+    """Build a plain monospace-aligned table string."""
+    if not headers:
+        return ""
+    width = len(headers)
+    norm_rows = [list(r[:width]) + [""] * max(0, width - len(r)) for r in rows]
+    cols = list(zip(*([headers] + norm_rows))) if norm_rows else [[h] for h in headers]
+    widths = [max(len(str(c)) for c in col) for col in cols]
+
+    def fmt_row(cells: list[str]) -> str:
+        return "  ".join(str(cells[i]).ljust(widths[i]) for i in range(width))
+
+    out = [fmt_row(headers), "  ".join("-" * w for w in widths)]
+    for row in norm_rows:
+        out.append(fmt_row(row))
+    return "\n".join(out) + "\n"
+
+
+def fence(text: str, lang: str = "text") -> str:
+    """Wrap text in a markdown fenced code block."""
+    body = text.rstrip("\n")
+    return f"```{lang}\n{body}\n```\n"
+
+
+def print_console_table(headers: list[str], rows: list[list[str]]) -> None:
+    """Print a simple aligned plain-text table (no markdown chrome)."""
+    print(aligned_table_text(headers, rows), end="")
 
 def print_console_qor(qor: QoRTables, console_print: bool) -> None:
     print(colour(f"Top report     : {qor.top_report}", DIM))
@@ -617,18 +743,99 @@ def print_console_qor(qor: QoRTables, console_print: bool) -> None:
         print(colour(f"Summary report : {qor.summary_report}", DIM))
 
     section("Estimated Quality of Results")
+    metrics = qor.headline_metrics()
 
     print(colour("--- Timing Summary ---", BOLD, MAGENTA))
-    if qor.timing_summary:
+    if all(k in metrics for k in ("clock_target_ns", "clock_estimated_ns", "clock_uncertainty_ns")):
+        print_console_table(
+            ["Clock", "Target (ns)", "Estimated (ns)", "Uncertainty (ns)"],
+            [[
+                "ap_clk",
+                metrics["clock_target_ns"],
+                metrics["clock_estimated_ns"],
+                metrics["clock_uncertainty_ns"],
+            ]],
+        )
+    elif qor.timing_summary:
         print(qor.timing_summary)
     else:
         warn("Could not find Timing summary in report.")
+    print()
 
     print(colour("--- Latency Summary (cycles) ---", BOLD, MAGENTA))
-    if qor.latency_summary:
+    if all(
+        k in metrics
+        for k in (
+            "latency_min_cycles",
+            "latency_max_cycles",
+            "latency_min_time",
+            "latency_max_time",
+            "interval_min",
+            "interval_max",
+        )
+    ):
+        print_console_table(
+            [
+                "Lat min",
+                "Lat max",
+                "Abs min",
+                "Abs max",
+                "II min",
+                "II max",
+            ],
+            [[
+                metrics["latency_min_cycles"],
+                metrics["latency_max_cycles"],
+                metrics["latency_min_time"],
+                metrics["latency_max_time"],
+                metrics["interval_min"],
+                metrics["interval_max"],
+            ]],
+        )
+    elif qor.latency_summary:
         print(qor.latency_summary)
     else:
         warn("Could not find Latency summary in report.")
+    print()
+
+    print(colour("--- Resource Usage Summary (top-level) ---", BOLD, MAGENTA))
+    util = qor.utilization_summary or ""
+    total = re.search(
+        r"\|\s*Total\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+        util,
+    )
+    available = re.search(
+        r"\|\s*Available\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+        util,
+    )
+    pct = re.search(
+        r"\|\s*Utilization\s*\(%\)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|\s*([^|]+)\|",
+        util,
+    )
+    if total and available and pct:
+        rows = []
+        for i, name in enumerate(("BRAM", "DSP", "FF", "LUT", "URAM"), start=1):
+            rows.append([
+                name,
+                total.group(i).strip(),
+                available.group(i).strip(),
+                pct.group(i).strip(),
+            ])
+        print_console_table(
+            ["Resource", "Total", "Available", "Utilization (%)"],
+            rows,
+        )
+    else:
+        print(qor.resource_usage_text(), end="")
+
+    lut_pct = metrics.get("lut_pct")
+    if lut_pct:
+        try:
+            if float(lut_pct) > 100:
+                warn(f"LUT utilization is {lut_pct}% — design exceeds device capacity.")
+        except ValueError:
+            pass
+    print()
 
     if not console_print:
         print(
@@ -686,17 +893,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  --console-print: {opts.console_print}")
     print(f"  --no-save      : {opts.no_save}")
     print(f"  --dry-run      : {opts.dry_run}")
+    print(f"  --jobs         : {opts.jobs}")
 
     env_bin = str(vitis_run.parent)
     path = os.environ.get("PATH", "")
     if env_bin not in path.split(os.pathsep):
         os.environ["PATH"] = env_bin + os.pathsep + path
 
+    jobs_env = {"XILINX_NUM_THREADS": str(opts.jobs)}
+    jobs_args = ["--hls.jobs", str(opts.jobs)]
+
     # ------------------------------------------------------------------
     # 1) C Simulation
     # ------------------------------------------------------------------
     section("Beginning C Simulation")
-    csim = run_with_timer(
+    csim = run_streaming(
         [
             str(vitis_run),
             "--mode",
@@ -706,9 +917,11 @@ def main(argv: list[str] | None = None) -> int:
             str(cfg),
             "--work_dir",
             str(work_dir),
+            *jobs_args,
         ],
         cwd=workspace,
         label="C simulation",
+        extra_env=jobs_env,
     )
 
     if not csim_passed(work_dir, csim):
@@ -723,7 +936,7 @@ def main(argv: list[str] | None = None) -> int:
     # 2) C Synthesis
     # ------------------------------------------------------------------
     section("Beginning C Synthesis")
-    synth = run_with_timer(
+    synth = run_streaming(
         [
             str(vpp),
             "-c",
@@ -733,9 +946,11 @@ def main(argv: list[str] | None = None) -> int:
             str(cfg),
             "--work_dir",
             str(work_dir),
+            *jobs_args,
         ],
         cwd=workspace,
         label="C synthesis",
+        extra_env=jobs_env,
     )
 
     if synth.returncode != 0:

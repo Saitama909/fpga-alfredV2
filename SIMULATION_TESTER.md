@@ -92,14 +92,10 @@ Default behaviour:
 |------|----------------|
 | C-sim | Runs; must PASS before synthesis |
 | C-synth | Runs after a passing sim |
-| Console | Prints **Timing summary** + **Latency summary** only |
+| Console | Prints **Timing summary**, **Latency summary**, and **Resource usage summary** (top-level BRAM/DSP/FF/LUT) |
 | Disk | Writes full tables to `results/results-<UNIX_TIMESTAMP>.md` |
 
-While tools are running, the console updates a single line:
-
-```text
-working on it 12
-```
+While tools are running, **Vitis/v++ log lines are streamed live** to your terminal (stdout and stderr merged). A short `finished … in Ns` line is printed when each step completes.
 
 ---
 
@@ -144,6 +140,20 @@ python3 simulation_tester.py --dry-run
 
 Useful as a quick smoke test after changing HLS source or Vitis config.
 
+### `--jobs N`
+
+Hint how many parallel jobs/threads Vitis HLS may use.
+
+- Passed to tools as `--hls.jobs N`
+- Also sets `XILINX_NUM_THREADS=N` for the child process
+- **Default:** this machine's CPU count (`os.cpu_count()`)
+- C-synthesis is still often mostly single-threaded; extra jobs help only where the tools can parallelise (and more for later Vivado steps)
+
+```bash
+python3 simulation_tester.py --jobs 16
+python3 simulation_tester.py --jobs 4 --dry-run
+```
+
 ### Combining flags
 
 | Command | Console | Save file |
@@ -153,6 +163,7 @@ Useful as a quick smoke test after changing HLS source or Vitis config.
 | `python3 simulation_tester.py --no-save` | summaries | no |
 | `python3 simulation_tester.py --console-print --no-save` | summaries + full tables | no |
 | `python3 simulation_tester.py --dry-run` | sim/synth status only | no |
+| `python3 simulation_tester.py --jobs 16` | summaries | yes (HLS jobs=16) |
 
 `--dry-run` always skips saving (same end result as `--no-save` for files, but also skips report parsing).
 
@@ -172,8 +183,8 @@ The markdown file includes:
 
 1. A short header (timestamp + report paths)
 2. A **headline metrics** table (max/min latency cycles, clock, BRAM/DSP/FF/LUT when parseable)
-3. Timing / latency summaries and full tables as **proper markdown tables**
-4. Performance & Resource Estimates as markdown tables
+3. Timing / latency / resource summaries and full report tables as **fenced text/code blocks** (keeps wide HLS tables readable; markdown tables were squashing columns)
+4. Performance & Resource Estimates in the same fenced text form
 
 The `results/` folder is created automatically next to `simulation_tester.py` (repo root).
 
