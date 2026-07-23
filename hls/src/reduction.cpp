@@ -2,41 +2,46 @@
 #include "params.h"
 #include "reduction.h"
 
-/*************************************************
-* Name:        montgomery_reduce
-*
-* Description: Montgomery reduction; given a 32-bit integer a, computes
-*              16-bit integer congruent to a * R^-1 mod q, where R=2^16
-*
-* Arguments:   - int32_t a: input integer to be reduced;
-*                           has to be in {-q2^15,...,q2^15-1}
-*
-* Returns:     integer in {-q+1,...,q-1} congruent to a * R^-1 modulo q.
-**************************************************/
-int16_t montgomery_reduce(int32_t a)
-{
-  int16_t t;
+/*
+ * Montgomery reduction: return something congruent to a * R^{-1} mod q,
+ * with R = 2^16. Same maths as reference Kyber; we just spell the steps
+ * out a bit so HLS can inline this into fqmul and park the multiplies on
+ * DSPs.
+ *
+ * Input a must sit in {-q*2^15, ..., q*2^15 - 1}.
+ * Output is in {-q+1, ..., q-1}.
+ */
+int16_t montgomery_reduce(int32_t a) {
+  #pragma HLS INLINE
 
-  t = (int16_t)a*QINV;
-  t = (a - (int32_t)t*KYBER_Q) >> 16;
-  return t;
+  /* Low 16 bits of a, times QINV. */
+  const int16_t a_lo = (int16_t)a;
+  int32_t m32 = (int32_t)a_lo * (int32_t)QINV;
+  #pragma HLS BIND_OP variable=m32 op=mul impl=dsp
+  const int16_t m = (int16_t)m32;
+
+  int32_t t = (int32_t)m * (int32_t)KYBER_Q;
+  #pragma HLS BIND_OP variable=t op=mul impl=dsp
+
+  return (int16_t)((a - t) >> 16);
 }
 
-/*************************************************
-* Name:        barrett_reduce
-*
-* Description: Barrett reduction; given a 16-bit integer a, computes
-*              centered representative congruent to a mod q in {-(q-1)/2,...,(q-1)/2}
-*
-* Arguments:   - int16_t a: input integer to be reduced
-*
-* Returns:     integer in {-(q-1)/2,...,(q-1)/2} congruent to a modulo q.
-**************************************************/
+/*
+ * Barrett reduction to a centred residue mod q.
+ * Used on the inverse NTT path. Same idea as above: inline + DSP mul so
+ * it doesn't sit as a heavy call boundary.
+ *
+ * Output is in {-(q-1)/2, ..., (q-1)/2}.
+ */
 int16_t barrett_reduce(int16_t a) {
-  int16_t t;
-  const int16_t v = ((1<<26) + KYBER_Q/2)/KYBER_Q;
+  #pragma HLS INLINE
 
-  t  = ((int32_t)v*a + (1<<25)) >> 26;
-  t *= KYBER_Q;
-  return a - t;
+  const int16_t v = ((1 << 26) + KYBER_Q / 2) / KYBER_Q;
+
+  int32_t t32 = ((int32_t)v * (int32_t)a + (1 << 25)) >> 26;
+  #pragma HLS BIND_OP variable=t32 op=mul impl=dsp
+  int16_t t = (int16_t)t32;
+  t = (int16_t)(t * KYBER_Q);
+
+  return (int16_t)(a - t);
 }
