@@ -86,6 +86,7 @@ void ntt(int16_t r[256]) {
   #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
   
   copy_r: for (int i = 0; i < 256; i += 1) {
+    #pragma HLS PIPELINE II=1
 		local_r[i] = r[i];
 	}
   
@@ -108,6 +109,7 @@ void ntt(int16_t r[256]) {
   }
 
   copy_out_r: for (int i = 0; i < 256; i += 1) {
+    #pragma HLS PIPELINE II=1
 		r[i] = local_r[i];
 	}
 
