@@ -97,8 +97,8 @@ void ntt(int16_t r[256]) {
       // #pragma HLS LOOP_TRIPCOUNT min=1 max=64
       zeta = zetas[k++];
       for(j = start; j < start + len; j++) {
-        // #pragma HLS PIPELINE II=1
-        // #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
+        #pragma HLS PIPELINE II=1
+        #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
         // #pragma HLS LOOP_TRIPCOUNT min=2 max=128
         t = fqmul(zeta, local_r[j + len]);
         local_r[j + len] = local_r[j] - t;
