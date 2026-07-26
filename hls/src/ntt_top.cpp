@@ -2,6 +2,7 @@
 #include "params.h"
 #include "ntt_top.h"
 #include "reduction.h"
+#include "ap_int.h"
 
 /* Code to generate zetas and zetas_inv used in the number-theoretic transform:
 
@@ -36,7 +37,7 @@ void init_ntt() {
 }
 */
 
-const int16_t zetas[128] = {
+const ap_int<12> zetas[128] = {
   -1044,  -758,  -359, -1517,  1493,  1422,   287,   202,
    -171,   622,  1577,   182,   962, -1202, -1474,  1468,
     573, -1325,   264,   383,  -829,  1458, -1602,  -130,
