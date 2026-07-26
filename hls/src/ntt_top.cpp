@@ -71,6 +71,26 @@ static int16_t fqmul(int16_t a, int16_t b) {
   return montgomery_reduce((int32_t)a*b);
 }
 
+
+template <int LEN>
+static void ntt_stage(int16_t local_r[256]) {
+  #pragma HLS INLINE off
+  for (int g = 0; g < 128 / LEN; g++) {
+    #pragma HLS UNROLL
+    int16_t zeta = zetas[128 / LEN + g];
+    int start = g * (LEN << 1);
+    for (int off = 0; off < LEN; off++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
+      int j = start + off;
+      int16_t t = fqmul(zeta, local_r[j + LEN]);
+      local_r[j + LEN] = local_r[j] - t;
+      local_r[j] = local_r[j] + t;
+    }
+  }
+}
+
+
 /*************************************************
 * Name:        ntt
 *
@@ -86,37 +106,27 @@ void ntt(int16_t r[256]) {
 
   int16_t local_r[256];
   #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
-  
+
   copy_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
 		local_r[i] = r[i];
 	}
-  
 
-  k = 1;
-  for(len = 128; len >= 2; len >>= 1) {
-    #pragma HLS LOOP_TRIPCOUNT min=7 max=7
-    for(start = 0; start < 256; start += (len << 1)) {
-      // #pragma HLS LOOP_FLATTEN
-      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
-      zeta = zetas[k++];
-      for(j = start; j < start + len; j++) {
-        #pragma HLS PIPELINE II=1
-        #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
-        #pragma HLS LOOP_TRIPCOUNT min=2 max=128
-        t = fqmul(zeta, local_r[j + len]);
-        local_r[j + len] = local_r[j] - t;
-        local_r[j] = local_r[j] + t;
-      }
-    }
-  }
+
+  ntt_stage<128>(local_r);
+  ntt_stage<64>(local_r);
+  ntt_stage<32>(local_r);
+  ntt_stage<16>(local_r);
+  ntt_stage<8>(local_r);
+  ntt_stage<4>(local_r);
+  ntt_stage<2>(local_r);
 
   copy_out_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
 		r[i] = local_r[i];
 	}
 
-  
+
 }
 
 /*************************************************
