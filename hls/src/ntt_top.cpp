@@ -107,12 +107,13 @@ void ntt(int16_t r[256]) {
   int16_t local_r[256];
   #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
 
+  // TODO: extract into function for dataflow
   copy_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
 		local_r[i] = r[i];
 	}
 
-
+  // TODO: dataflow. inter stage input output buffers
   ntt_stage<128>(local_r);
   ntt_stage<64>(local_r);
   ntt_stage<32>(local_r);
@@ -129,6 +130,8 @@ void ntt(int16_t r[256]) {
 
 }
 
+
+// TODO: recalculate zetas for the inverse into 
 /*************************************************
 * Name:        invntt_tomont
 *

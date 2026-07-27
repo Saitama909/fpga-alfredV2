@@ -23,6 +23,8 @@ int16_t montgomery_reduce(int32_t a)
   return t;
 }
 
+// TODO: reduce internal bitwidth
+
 /*************************************************
 * Name:        barrett_reduce
 *
