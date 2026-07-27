@@ -4,9 +4,10 @@
 
 #include <stdint.h>
 #include "params.h"
+#include "ap_int.h"
 
 #define zetas KYBER_NAMESPACE(zetas)
-extern const int16_t zetas[128];
+extern const ap_int<12> zetas[128];
 
 #define ntt KYBER_NAMESPACE(ntt)
 void ntt(int16_t poly[256]);
