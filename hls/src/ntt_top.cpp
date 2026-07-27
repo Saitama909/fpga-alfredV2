@@ -2,6 +2,7 @@
 #include "params.h"
 #include "ntt_top.h"
 #include "reduction.h"
+#include "ap_int.h"
 
 /* How the zetas table was generated (from the reference Kyber code):
 
@@ -36,8 +37,7 @@ void init_ntt() {
 }
 */
 
-/* Precomputed twiddle factors for the forward / inverse NTT. */
-const int16_t zetas[128] = {
+const ap_int<12> zetas[128] = {
   -1044,  -758,  -359, -1517,  1493,  1422,   287,   202,
    -171,   622,  1577,   182,   962, -1202, -1474,  1468,
     573, -1325,   264,   383,  -829,  1458, -1602,  -130,
@@ -62,121 +62,38 @@ const int16_t zetas[128] = {
  */
 static int16_t fqmul(int16_t a, int16_t b) {
   #pragma HLS INLINE
-  int32_t prod = (int32_t)a * (int32_t)b;
-  #pragma HLS BIND_OP variable=prod op=mul impl=dsp
-  return montgomery_reduce(prod);
+  return montgomery_reduce((int32_t)a*b);
 }
 
-/*
- * Which forward-NTT schedule to build:
- *   1 = out-of-place ping-pong (best QoR so far: about 5382 cycles, 67% LUT)
- *   0 = older in-place path (about 27.6k cycles, 27% LUT)
- *
- * See OPTIMISATION_REPORT.md for the full story.
- */
-#ifndef NTT_USE_PINGPONG
-#define NTT_USE_PINGPONG 1
-#endif
 
-/* How many coeffs we copy per beat on the way in/out of the local buffers. */
-static const unsigned int COPY_PARALLEL = 8;
-
-#if NTT_USE_PINGPONG
-
-/*
- * Butterflies issued together inside one group (same zeta).
- * We settled on 2: bumping to 4 with group unroll 2 made latency worse.
- * Group unroll factor is the literal 2 on the pragma below (HLS is happier
- * with a constant there than a named one).
- */
-static const unsigned int NTT_PARALLEL = 2;
-
-/*
- * One Cooley-Tukey stage, out of place.
- * Reads every element of src once and writes every element of dst once.
- * Groups in a stage don't touch the same indices, so we can unroll a couple.
- */
-static void ntt_stage(int16_t dst[256], const int16_t src[256],
-                      unsigned int len, unsigned int &k) {
-  #pragma HLS INLINE
-
-  const unsigned int n_groups = 128 / len;
-  const unsigned int k_base = k;
-  k = k_base + n_groups;
-
-  group_loop: for (unsigned int g = 0; g < n_groups; g++) {
-    #pragma HLS LOOP_TRIPCOUNT min=1 max=64
-    #pragma HLS UNROLL factor=2
-    const unsigned int start = g * (len << 1);
-    const int16_t zeta = zetas[k_base + g];
-
-    butterfly_loop: for (unsigned int j = start; j < start + len; j += NTT_PARALLEL) {
+template <int LEN>
+static void ntt_stage(int16_t local_r[256]) {
+  #pragma HLS INLINE off
+  for (int g = 0; g < 128 / LEN; g++) {
+    #pragma HLS UNROLL
+    int16_t zeta = zetas[128 / LEN + g];
+    int start = g * (LEN << 1);
+    for (int off = 0; off < LEN; off++) {
       #pragma HLS PIPELINE II=1
-      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
-      for (unsigned int p = 0; p < NTT_PARALLEL; p++) {
-        #pragma HLS UNROLL
-        if (j + p < start + len) {
-          const unsigned int jj = j + p;
-          const int16_t t = fqmul(zeta, src[jj + len]);
-          dst[jj + len] = src[jj] - t;
-          dst[jj] = src[jj] + t;
-        }
-      }
+      #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
+      int j = start + off;
+      int16_t t = fqmul(zeta, local_r[j + LEN]);
+      local_r[j + LEN] = local_r[j] - t;
+      local_r[j] = local_r[j] + t;
     }
   }
 }
 
-/*
- * Forward NTT (standard order in, bit-reversed out).
- *
- * Ping-pong between two fully partitioned buffers so each stage can read
- * one and write the other without in-place hazards. Seven explicit stage
- * calls (len = 128 down to 2) keep the geometry obvious to HLS; after an
- * odd number of swaps the answer lives in buf_b.
- */
-void ntt(int16_t r[256]) {
-  int16_t buf_a[256];
-  int16_t buf_b[256];
-  #pragma HLS ARRAY_PARTITION variable=buf_a complete dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf_b complete dim=1
 
-  /* Pull the polynomial into local storage. */
-  copy_in: for (int i = 0; i < 256; i += COPY_PARALLEL) {
-    #pragma HLS PIPELINE II=1
-    for (unsigned int p = 0; p < COPY_PARALLEL; p++) {
-      #pragma HLS UNROLL
-      buf_a[i + p] = r[i + p];
-    }
-  }
+/*************************************************
+* Name:        ntt
+*
+* Description: Inplace number-theoretic transform (NTT) in Rq.
+*              input is in standard order, output is in bitreversed order
+*
+* Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
+**************************************************/
 
-  /* zetas[0] is unused on the forward path, same as the reference. */
-  unsigned int k = 1;
-
-  ntt_stage(buf_b, buf_a, 128, k);
-  ntt_stage(buf_a, buf_b, 64, k);
-  ntt_stage(buf_b, buf_a, 32, k);
-  ntt_stage(buf_a, buf_b, 16, k);
-  ntt_stage(buf_b, buf_a, 8, k);
-  ntt_stage(buf_a, buf_b, 4, k);
-  ntt_stage(buf_b, buf_a, 2, k);
-
-  /* Write the result back out. */
-  copy_out: for (int i = 0; i < 256; i += COPY_PARALLEL) {
-    #pragma HLS PIPELINE II=1
-    for (unsigned int p = 0; p < COPY_PARALLEL; p++) {
-      #pragma HLS UNROLL
-      r[i + p] = buf_b[i + p];
-    }
-  }
-}
-
-#else /* NTT_USE_PINGPONG == 0 */
-
-/*
- * Older in-place forward NTT. Kept around as a fallback / comparison point.
- * Fully partitioned local_r, four butterflies per beat, wide copies.
- * About 27.6k cycles and 27% LUT on the last synth we ran.
- */
 void ntt(int16_t r[256]) {
   unsigned int len, start, j, k;
   int16_t zeta;
@@ -185,53 +102,37 @@ void ntt(int16_t r[256]) {
   int16_t local_r[256];
   #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
 
-  copy_in: for (int i = 0; i < 256; i += COPY_PARALLEL) {
+  copy_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
-    for (unsigned int p = 0; p < COPY_PARALLEL; p++) {
-      #pragma HLS UNROLL
-      local_r[i + p] = r[i + p];
-    }
-  }
+		local_r[i] = r[i];
+	}
 
-  k = 1;
-  stage_loop: for (len = 128; len >= 2; len >>= 1) {
-    #pragma HLS LOOP_TRIPCOUNT min=7 max=7
-    group_loop: for (start = 0; start < 256; start += (len << 1)) {
-      #pragma HLS LOOP_TRIPCOUNT min=1 max=64
-      zeta = zetas[k++];
-      butterfly_loop: for (j = start; j < start + len; j += PARALLEL) {
-        #pragma HLS PIPELINE II=1
-        #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
-        #pragma HLS LOOP_TRIPCOUNT min=1 max=32
-        for (unsigned int p = 0; p < PARALLEL; p++) {
-          #pragma HLS UNROLL
-          if (j + p < start + len) {
-            const unsigned int jj = j + p;
-            const int16_t t = fqmul(zeta, local_r[jj + len]);
-            local_r[jj + len] = local_r[jj] - t;
-            local_r[jj] = local_r[jj] + t;
-          }
-        }
-      }
-    }
-  }
 
-  copy_out: for (int i = 0; i < 256; i += COPY_PARALLEL) {
+  ntt_stage<128>(local_r);
+  ntt_stage<64>(local_r);
+  ntt_stage<32>(local_r);
+  ntt_stage<16>(local_r);
+  ntt_stage<8>(local_r);
+  ntt_stage<4>(local_r);
+  ntt_stage<2>(local_r);
+
+  copy_out_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
-    for (unsigned int p = 0; p < COPY_PARALLEL; p++) {
-      #pragma HLS UNROLL
-      r[i + p] = local_r[i + p];
-    }
-  }
+		r[i] = local_r[i];
+	}
+
+
 }
 
-#endif /* NTT_USE_PINGPONG */
-
-/*
- * Inverse NTT, then scale by the Montgomery factor 2^16.
- * Bit-reversed in, standard order out. Still the reference structure;
- * we haven't spent the same HLS effort here as on the forward path.
- */
+/*************************************************
+* Name:        invntt_tomont
+*
+* Description: Inplace inverse number-theoretic transform in Rq and
+*              multiplication by Montgomery factor 2^16.
+*              Input is in bitreversed order, output is in standard order
+*
+* Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
+**************************************************/
 void invntt(int16_t r[256]) {
   unsigned int start, len, j, k;
   int16_t t, zeta;
