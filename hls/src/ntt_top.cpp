@@ -4,6 +4,21 @@
 #include "reduction.h"
 #include "ap_int.h"
 
+///////// HLS LEVERS //////////////////////////////////////////////////////////
+/*
+  Thought it might be worth having these at the top for future twiddling.
+  Makes it easier to tune. -Riley
+*/
+
+// COEFF_INPUT_WIDTH: Number of coeffs copied in/out of local_r per cycle.
+//    reqs: must divide 256. e.g 8, 16, 32, 64
+//    def: Higher = fewer cycles, wider memory ports at the cost of more LUTs.
+//    notes: Setting this to 1 will make the design what it was originally/baseline.
+//           From my testing, 32 gives the best performance. After which it is diminishing returns.
+static const int COEFF_INPUT_WIDTH = 32;
+
+///////////////////////////////////////////////////////////////////////////////
+
 /* How the zetas table was generated (from the reference Kyber code):
 
 #define KYBER_ROOT_OF_UNITY 17
@@ -95,18 +110,16 @@ static void ntt_stage(int16_t local_r[256]) {
 **************************************************/
 
 void ntt(int16_t r[256]) {
-  unsigned int len, start, j, k;
-  int16_t zeta;
-  const unsigned int PARALLEL = 4;
-
   int16_t local_r[256];
   #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
 
-  copy_r: for (int i = 0; i < 256; i += 1) {
+  copy_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
     #pragma HLS PIPELINE II=1
-		local_r[i] = r[i];
-	}
-
+    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
+      #pragma HLS UNROLL
+      local_r[i + t] = r[i + t];
+    }
+  }
 
   ntt_stage<128>(local_r);
   ntt_stage<64>(local_r);
@@ -116,12 +129,13 @@ void ntt(int16_t r[256]) {
   ntt_stage<4>(local_r);
   ntt_stage<2>(local_r);
 
-  copy_out_r: for (int i = 0; i < 256; i += 1) {
+  copy_out_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
     #pragma HLS PIPELINE II=1
-		r[i] = local_r[i];
-	}
-
-
+    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
+      #pragma HLS UNROLL
+      r[i + t] = local_r[i + t];
+    }
+  }
 }
 
 /*************************************************

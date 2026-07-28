@@ -1,1 +1,4 @@
 /results
+/testing/logs
+/testing/outputs
+*__pycache__*
