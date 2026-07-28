@@ -147,6 +147,32 @@
     ntt_stage<2>  (buf6, r);      // writes r directly, no copy_out
   }
 
+  template <int LEN, bool SCALE>
+  static void invntt_stage(const int16_t in[256], int16_t out[256]) {
+    #pragma HLS INLINE off
+    const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
+    for (int i = 0; i < 128; i++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=4
+      int g     = i / LEN;
+      int off   = i % LEN;
+      int start = g * (LEN << 1);
+      int j     = start + off;
+      int16_t zeta = zetas_inv[128 / LEN + g];
+      int16_t t = in[j];
+      int16_t b = in[j + LEN];
+      int16_t s = barrett_reduce(t + b);
+      int16_t d = fqmul(zeta, (int16_t)(t - b));
+      // inverse NTT needs a final multiply-by-1/128 on every coefficient
+      if (SCALE) {                          
+        s = fqmul(s, f);
+        d = fqmul(d, f);
+      }
+      out[j]       = s;
+      out[j + LEN] = d;
+    }
+  }
+
   /*************************************************
   * Name:        invntt_tomont
   *
@@ -157,27 +183,25 @@
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
   void invntt(int16_t r[256]) {
-    unsigned int start, len, j, k;
-    int16_t t, zeta;
-    const int16_t f = 1441; // mont^2/128
+    #pragma HLS DATAFLOW
+    // no partition on r
 
-    k = 1;
-    for(len = 2; len <= 128; len <<= 1) {
-      int m = 128 / len;          
-      int g = 0;
-      for(start = 0; start < 256; start = j + len, g++) {
-        zeta = zetas_inv[m + g]; 
-        for(j = start; j < start + len; j++) {
-          t = r[j];
-          int16_t b = r[j + len];
-          r[j] = barrett_reduce(t + b);
-          r[j + len] = fqmul(zeta, (int16_t)(t - b));
-        }
-      }
-    }
+    int16_t buf1[256], buf2[256], buf3[256];
+    int16_t buf4[256], buf5[256], buf6[256];
+    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
 
-    for(j = 0; j < 256; j++)
-      r[j] = fqmul(r[j], f);
+    invntt_stage<2,   false>(r,    buf1);   // reads r directly, no copy_in
+    invntt_stage<4,   false>(buf1, buf2);
+    invntt_stage<8,   false>(buf2, buf3);
+    invntt_stage<16,  false>(buf3, buf4);
+    invntt_stage<32,  false>(buf4, buf5);
+    invntt_stage<64,  false>(buf5, buf6);
+    invntt_stage<128, true> (buf6, r);      // writes r directly + applies 1/128
   }
 
   /*************************************************
