@@ -73,19 +73,20 @@ static int16_t fqmul(int16_t a, int16_t b) {
 
 
 template <int LEN>
-static void ntt_stage(int16_t local_r[256]) {
+static void ntt_stage(int16_t in_r[256], int16_t out_r[256]) {
   #pragma HLS INLINE off
+#pragma HLS PIPELINE II=1
   for (int g = 0; g < 128 / LEN; g++) {
-    #pragma HLS UNROLL
     int16_t zeta = zetas[128 / LEN + g];
     int start = g * (LEN << 1);
     for (int off = 0; off < LEN; off++) {
-      #pragma HLS PIPELINE II=1
-      #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
+      #pragma HLS DEPENDENCE variable=out_r type=inter dependent=false
+      #pragma HLS DEPENDENCE variable=in_r type=inter dependent=false
+      #pragma HLS UNROLL
       int j = start + off;
-      int16_t t = fqmul(zeta, local_r[j + LEN]);
-      local_r[j + LEN] = local_r[j] - t;
-      local_r[j] = local_r[j] + t;
+      int16_t t = fqmul(zeta, in_r[j + LEN]);
+      out_r[j + LEN] = in_r[j] - t;
+      out_r[j] = in_r[j] + t;
     }
   }
 }
@@ -100,33 +101,46 @@ static void ntt_stage(int16_t local_r[256]) {
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
 
-void ntt(int16_t r[256]) {
-  unsigned int len, start, j, k;
-  int16_t t, zeta;
-
-  int16_t local_r[256];
-  #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
-
-  // TODO: extract into function for dataflow
-  copy_r: for (int i = 0; i < 256; i += 1) {
+static void copy_input_r(int16_t r[256], int16_t local_r[256]) {
+  copy_in_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
-		local_r[i] = r[i];
-	}
+    local_r[i] = r[i];
+  }
+}
 
-  // TODO: dataflow. inter stage input output buffers
-  ntt_stage<128>(local_r);
-  ntt_stage<64>(local_r);
-  ntt_stage<32>(local_r);
-  ntt_stage<16>(local_r);
-  ntt_stage<8>(local_r);
-  ntt_stage<4>(local_r);
-  ntt_stage<2>(local_r);
-
+static void copy_output_r(int16_t r[256], int16_t local_r[256]) {
   copy_out_r: for (int i = 0; i < 256; i += 1) {
     #pragma HLS PIPELINE II=1
-		r[i] = local_r[i];
-	}
+    r[i] = local_r[i];
+  }
+}
 
+
+void ntt(int16_t r[256]) {
+  #pragma HLS DATAFLOW
+
+  int16_t buf0[256], buf1[256], buf2[256], buf3[256];
+  int16_t buf4[256], buf5[256], buf6[256], buf7[256];
+  #pragma HLS ARRAY_PARTITION variable=buf0 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf1 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 complete dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf7 complete dim=1
+
+  copy_input_r(r, buf0);
+
+  ntt_stage<128>(buf0, buf1);
+  ntt_stage<64>(buf1, buf2);
+  ntt_stage<32>(buf2, buf3);
+  ntt_stage<16>(buf3, buf4);
+  ntt_stage<8>(buf4, buf5);
+  ntt_stage<4>(buf5, buf6);
+  ntt_stage<2>(buf6, buf7);
+
+  copy_output_r(r, buf7);
 
 }
 
