@@ -1,0 +1,8 @@
+cosim_pass=True
+status=Pass
+lat_min=485
+lat_avg=485
+lat_max=485
+ii_max=NA
+total_cycles=485
+time=2026-07-28T19:04:19

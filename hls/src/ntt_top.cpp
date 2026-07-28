@@ -14,8 +14,8 @@
 //    reqs: must divide 256. e.g 8, 16, 32, 64
 //    def: Higher = fewer cycles, wider memory ports at the cost of more LUTs.
 //    notes: Setting this to 1 will make the design what it was originally/baseline.
-//           From my testing, 32 gives the best performance. After which it is diminishing returns.
-static const int COEFF_INPUT_WIDTH = 32;
+//           From my testing, 256 gives the best performance. After which it is diminishing returns.
+static const int COEFF_INPUT_WIDTH = 256;
 
 ///////////////////////////////////////////////////////////////////////////////
 

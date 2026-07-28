@@ -1,0 +1,16 @@
+csynth summary 2026-07-28T19:05:36
+
+clock_target=5.00
+clock_est=3.650
+clock_unc=1.35
+lat_min=480
+lat_max=480
+abs_min=2.400 us
+abs_max=2.400 us
+BRAM=29/288 (10%)
+DSP=372/1248 (29%)
+FF=60139/234240 (25%)
+LUT=83388/117120 (71%)
+URAM=0/64 (0%)
+lut_pct=71
+LUT util 71% >= 70%
