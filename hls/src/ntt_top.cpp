@@ -92,15 +92,21 @@
 
 
   template <int LEN>
-    static void ntt_stage(const int16_t in[256], int16_t out[256]) {
+  static void ntt_stage(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
     for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
+      // builds 4 butterflies working in parallel
+      #pragma HLS UNROLL factor=4 
+      // loop flatten
       int g     = i / LEN;
       int off   = i % LEN;
       int start = g * (LEN << 1);
       int j     = start + off;
       int16_t zeta = zetas[128 / LEN + g];
+
+      // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses 
+      // (and needed a DEPENDENCE pragma).
       int16_t a = in[j];
       int16_t b = in[j + LEN];
       int16_t t = fqmul(zeta, b);
@@ -124,12 +130,13 @@
 
     int16_t buf1[256], buf2[256], buf3[256];
     int16_t buf4[256], buf5[256], buf6[256];
-    #pragma HLS ARRAY_PARTITION variable=buf1 complete dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf2 complete dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf3 complete dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf4 complete dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf5 complete dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf6 complete dim=1
+    
+    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
     // dataflow style
     ntt_stage<128>(r,    buf1);   // reads r directly, no copy_in
     ntt_stage<64> (buf1, buf2);
