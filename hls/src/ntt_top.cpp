@@ -92,20 +92,26 @@
 
 
   template <int LEN>
-  static void ntt_stage(int16_t local_r[256]) {
+  static void ntt_stage(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
-    for (int g = 0; g < 128 / LEN; g++) {
-      #pragma HLS UNROLL
-      int16_t zeta = zetas[128 / LEN + g];
+    for (int i = 0; i < 128; i++) {
+      #pragma HLS PIPELINE II=1
+      // builds 4 butterflies working in parallel
+      #pragma HLS UNROLL factor=4 
+      // loop flatten
+      int g     = i / LEN;
+      int off   = i % LEN;
       int start = g * (LEN << 1);
-      for (int off = 0; off < LEN; off++) {
-        #pragma HLS PIPELINE II=1
-        #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
-        int j = start + off;
-        int16_t t = fqmul(zeta, local_r[j + LEN]);
-        local_r[j + LEN] = local_r[j] - t;
-        local_r[j] = local_r[j] + t;
-      }
+      int j     = start + off;
+      int16_t zeta = zetas[128 / LEN + g];
+
+      // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses 
+      // (and needed a DEPENDENCE pragma).
+      int16_t a = in[j];
+      int16_t b = in[j + LEN];
+      int16_t t = fqmul(zeta, b);
+      out[j]       = a + t;
+      out[j + LEN] = a - t;
     }
   }
 
@@ -120,32 +126,51 @@
   **************************************************/
 
   void ntt(int16_t r[256]) {
-    unsigned int len, start, j, k;
-    int16_t t, zeta;
+    #pragma HLS DATAFLOW
 
-    int16_t local_r[256];
-    #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
+    int16_t buf1[256], buf2[256], buf3[256];
+    int16_t buf4[256], buf5[256], buf6[256];
+    
+    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
+    // dataflow style
+    ntt_stage<128>(r,    buf1);   // reads r directly, no copy_in
+    ntt_stage<64> (buf1, buf2);
+    ntt_stage<32> (buf2, buf3);
+    ntt_stage<16> (buf3, buf4);
+    ntt_stage<8>  (buf4, buf5);
+    ntt_stage<4>  (buf5, buf6);
+    ntt_stage<2>  (buf6, r);      // writes r directly, no copy_out
+  }
 
-    copy_r: for (int i = 0; i < 256; i += 1) {
+  template <int LEN, bool SCALE>
+  static void invntt_stage(const int16_t in[256], int16_t out[256]) {
+    #pragma HLS INLINE off
+    const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
+    for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
-      local_r[i] = r[i];
+      #pragma HLS UNROLL factor=4
+      int g     = i / LEN;
+      int off   = i % LEN;
+      int start = g * (LEN << 1);
+      int j     = start + off;
+      int16_t zeta = zetas_inv[128 / LEN + g];
+      int16_t t = in[j];
+      int16_t b = in[j + LEN];
+      int16_t s = barrett_reduce(t + b);
+      int16_t d = fqmul(zeta, (int16_t)(t - b));
+      // inverse NTT needs a final multiply-by-1/128 on every coefficient
+      if (SCALE) {                          
+        s = fqmul(s, f);
+        d = fqmul(d, f);
+      }
+      out[j]       = s;
+      out[j + LEN] = d;
     }
-
-
-    ntt_stage<128>(local_r);
-    ntt_stage<64>(local_r);
-    ntt_stage<32>(local_r);
-    ntt_stage<16>(local_r);
-    ntt_stage<8>(local_r);
-    ntt_stage<4>(local_r);
-    ntt_stage<2>(local_r);
-
-    copy_out_r: for (int i = 0; i < 256; i += 1) {
-      #pragma HLS PIPELINE II=1
-      r[i] = local_r[i];
-    }
-
-
   }
 
   /*************************************************
@@ -158,27 +183,25 @@
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
   void invntt(int16_t r[256]) {
-    unsigned int start, len, j, k;
-    int16_t t, zeta;
-    const int16_t f = 1441; // mont^2/128
+    #pragma HLS DATAFLOW
+    // no partition on r
 
-    k = 1;
-    for(len = 2; len <= 128; len <<= 1) {
-      int m = 128 / len;          
-      int g = 0;
-      for(start = 0; start < 256; start = j + len, g++) {
-        zeta = zetas_inv[m + g]; 
-        for(j = start; j < start + len; j++) {
-          t = r[j];
-          int16_t b = r[j + len];
-          r[j] = barrett_reduce(t + b);
-          r[j + len] = fqmul(zeta, (int16_t)(t - b));
-        }
-      }
-    }
+    int16_t buf1[256], buf2[256], buf3[256];
+    int16_t buf4[256], buf5[256], buf6[256];
+    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
 
-    for(j = 0; j < 256; j++)
-      r[j] = fqmul(r[j], f);
+    invntt_stage<2,   false>(r,    buf1);   // reads r directly, no copy_in
+    invntt_stage<4,   false>(buf1, buf2);
+    invntt_stage<8,   false>(buf2, buf3);
+    invntt_stage<16,  false>(buf3, buf4);
+    invntt_stage<32,  false>(buf4, buf5);
+    invntt_stage<64,  false>(buf5, buf6);
+    invntt_stage<128, true> (buf6, r);      // writes r directly + applies 1/128
   }
 
   /*************************************************
