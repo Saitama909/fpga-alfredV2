@@ -125,34 +125,22 @@
   void ntt(int16_t r[256]) {
     #pragma HLS DATAFLOW
 
-    int16_t buf0[256], buf1[256], buf2[256], buf3[256];
-    int16_t buf4[256], buf5[256], buf6[256], buf7[256];
-    #pragma HLS ARRAY_PARTITION variable=buf0 complete dim=1
+    int16_t buf1[256], buf2[256], buf3[256];
+    int16_t buf4[256], buf5[256], buf6[256];
     #pragma HLS ARRAY_PARTITION variable=buf1 complete dim=1
     #pragma HLS ARRAY_PARTITION variable=buf2 complete dim=1
     #pragma HLS ARRAY_PARTITION variable=buf3 complete dim=1
     #pragma HLS ARRAY_PARTITION variable=buf4 complete dim=1
     #pragma HLS ARRAY_PARTITION variable=buf5 complete dim=1
     #pragma HLS ARRAY_PARTITION variable=buf6 complete dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf7 complete dim=1
-
-    copy_in: for (int i = 0; i < 256; i++) {
-      #pragma HLS PIPELINE II=1
-      buf0[i] = r[i];
-    }
     // dataflow style
-    ntt_stage<128>(buf0, buf1);
+    ntt_stage<128>(r,    buf1);   // reads r directly, no copy_in
     ntt_stage<64> (buf1, buf2);
     ntt_stage<32> (buf2, buf3);
     ntt_stage<16> (buf3, buf4);
     ntt_stage<8>  (buf4, buf5);
     ntt_stage<4>  (buf5, buf6);
-    ntt_stage<2>  (buf6, buf7);
-
-    copy_out: for (int i = 0; i < 256; i++) {
-      #pragma HLS PIPELINE II=1
-      r[i] = buf7[i];
-    }
+    ntt_stage<2>  (buf6, r);      // writes r directly, no copy_out
   }
 
   /*************************************************
