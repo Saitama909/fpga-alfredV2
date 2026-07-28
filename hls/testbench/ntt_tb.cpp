@@ -3,6 +3,7 @@
 #include <cstring>
 #include <stdint.h>
 
+#include "../src/ntt_accel.h"
 #include "../src/params.h"
 #include "../src/reduction.h"
 #include "../src/ntt_top.h"
@@ -26,7 +27,7 @@ int main() {
     work[i] = orig[i];
   }
 
-  ntt(work);
+  ntt_accel(work);
   invntt(work);
 
   // invntt(ntt(r)) == r * MONT (mod q), per the ntt_top.cpp doc comment:
