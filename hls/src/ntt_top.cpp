@@ -92,7 +92,7 @@
 
 
   template <int LEN>
-  static void ntt_stage(int16_t local_r[256]) {
+  static void ntt_stage(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
     for (int g = 0; g < 128 / LEN; g++) {
       #pragma HLS UNROLL
@@ -100,11 +100,14 @@
       int start = g * (LEN << 1);
       for (int off = 0; off < LEN; off++) {
         #pragma HLS PIPELINE II=1
-        #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
         int j = start + off;
-        int16_t t = fqmul(zeta, local_r[j + LEN]);
-        local_r[j + LEN] = local_r[j] - t;
-        local_r[j] = local_r[j] + t;
+        // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses 
+        // (and needed a DEPENDENCE pragma).
+        int16_t a = in[j];
+        int16_t b = in[j + LEN];
+        int16_t t = fqmul(zeta, b);
+        out[j]       = a + t;
+        out[j + LEN] = a - t;
       }
     }
   }
@@ -120,32 +123,36 @@
   **************************************************/
 
   void ntt(int16_t r[256]) {
-    unsigned int len, start, j, k;
-    int16_t t, zeta;
+    #pragma HLS DATAFLOW
 
-    int16_t local_r[256];
-    #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
+    int16_t buf0[256], buf1[256], buf2[256], buf3[256];
+    int16_t buf4[256], buf5[256], buf6[256], buf7[256];
+    #pragma HLS ARRAY_PARTITION variable=buf0 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf1 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 complete dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf7 complete dim=1
 
-    copy_r: for (int i = 0; i < 256; i += 1) {
+    copy_in: for (int i = 0; i < 256; i++) {
       #pragma HLS PIPELINE II=1
-      local_r[i] = r[i];
+      buf0[i] = r[i];
     }
+    // dataflow style
+    ntt_stage<128>(buf0, buf1);
+    ntt_stage<64> (buf1, buf2);
+    ntt_stage<32> (buf2, buf3);
+    ntt_stage<16> (buf3, buf4);
+    ntt_stage<8>  (buf4, buf5);
+    ntt_stage<4>  (buf5, buf6);
+    ntt_stage<2>  (buf6, buf7);
 
-
-    ntt_stage<128>(local_r);
-    ntt_stage<64>(local_r);
-    ntt_stage<32>(local_r);
-    ntt_stage<16>(local_r);
-    ntt_stage<8>(local_r);
-    ntt_stage<4>(local_r);
-    ntt_stage<2>(local_r);
-
-    copy_out_r: for (int i = 0; i < 256; i += 1) {
+    copy_out: for (int i = 0; i < 256; i++) {
       #pragma HLS PIPELINE II=1
-      r[i] = local_r[i];
+      r[i] = buf7[i];
     }
-
-
   }
 
   /*************************************************
