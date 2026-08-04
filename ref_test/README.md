@@ -1,0 +1,1 @@
+The files included can be dropped into the official reference kyber implementation found here https://github.com/pq-crystals/kyber.git. They were used to test our verification.
