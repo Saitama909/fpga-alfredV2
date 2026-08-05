@@ -234,10 +234,10 @@
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     #pragma HLS INLINE off
     for (int i = 0; i < 64; i++) {
-      // TODO: unroll 2 touches indices 8i..8i+7 per cycle, which is one element
-      // per bank once the caller's buffers are cyclic-8 partitioned -> 32 cycles.
-      // #pragma HLS PIPELINE II=1
-      // #pragma HLS UNROLL factor=2
+      // unroll 2 touches indices 8i..8i+7 per cycle: one element per bank, given
+      // the caller's buffers are cyclic-8 partitioned
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=2
       int16_t z = (int16_t)zetas[64+i];
       basemul(&r[4*i],   &a[4*i],   &b[4*i],    z);
       basemul(&r[4*i+2], &a[4*i+2], &b[4*i+2], -z);
