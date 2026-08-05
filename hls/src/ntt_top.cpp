@@ -229,8 +229,15 @@
   }
 
 
+  // Pointwise multiply in the NTT domain; result carries a factor of R^-1.
+  // INLINE off only so it shows as its own module in the synthesis report.
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+    #pragma HLS INLINE off
     for (int i = 0; i < 64; i++) {
+      // TODO: unroll 2 touches indices 8i..8i+7 per cycle, which is one element
+      // per bank once the caller's buffers are cyclic-8 partitioned -> 32 cycles.
+      // #pragma HLS PIPELINE II=1
+      // #pragma HLS UNROLL factor=2
       int16_t z = (int16_t)zetas[64+i];
       basemul(&r[4*i],   &a[4*i],   &b[4*i],    z);
       basemul(&r[4*i+2], &a[4*i+2], &b[4*i+2], -z);
@@ -289,4 +296,46 @@
   void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     for (int i = 0; i < 256; i++)
       r[i] = a[i] - b[i];
+  }
+
+  static void copy_poly(const int16_t in[256], int16_t out[256]) {
+    #pragma HLS INLINE off
+    for (int i = 0; i < 256; i++) {
+      // TODO: PIPELINE II=1 + UNROLL factor=8 -> 32 cycles instead of 256.
+      out[i] = in[i];
+    }
+  }
+
+  /*************************************************
+  * Name:        poly_mul
+  *
+  * Description: r = a * b in Rq = Zq[X]/(X^256+1), via the NTT. Forward
+  *              transform both operands, multiply pointwise, transform back.
+  *              basemul contributes R^-1 and invntt contributes R, so the
+  *              Montgomery factors cancel and r is the plain product mod q
+  *              (lazily reduced: congruent mod q, not necessarily centered).
+  *
+  *              Inputs are copied into local buffers so the caller's arrays
+  *              survive, and so the interface arrays stay unpartitioned and
+  *              this can become an m_axi kernel later.
+  *
+  * Arguments:   - const int16_t a[256], b[256]: input polynomials
+  *              - int16_t r[256]: output polynomial
+  **************************************************/
+  void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
+    int16_t ta[256], tb[256], tr[256];
+    // TODO: ARRAY_PARTITION ta/tb/tr cyclic factor=8, and match it on the r
+    // argument of ntt/invntt, so the stages aren't limited to a 2-port BRAM.
+
+    copy_poly(a, ta);
+    copy_poly(b, tb);
+
+    // TODO: check the report for one shared ntt instance, or two and decide if we want to duplicate it for throughput
+    ntt(ta);
+    ntt(tb);
+
+    hls_poly_basemul(tr, ta, tb);
+    invntt(tr);
+
+    copy_poly(tr, r);
   }
