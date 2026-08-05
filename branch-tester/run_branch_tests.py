@@ -4,6 +4,7 @@
 #   python3 branch-tester/run_branch_tests.py
 #   python3 branch-tester/run_branch_tests.py --force
 #   python3 branch-tester/run_branch_tests.py --run-branch NAME
+#   python3 branch-tester/run_branch_tests.py --run-branch local
 #   python3 branch-tester/run_branch_tests.py --restore
 #   python3 branch-tester/run_branch_tests.py --compare
 #   python3 branch-tester/run_branch_tests.py --compare --all
@@ -36,6 +37,8 @@ TEST_CONFIG = ROOT / "testing" / "config.txt"
 TEST_LOGS = ROOT / "testing" / "logs"
 TEST_OUTS = ROOT / "testing" / "outputs"
 COMPARE_OUT = HERE / "compare-summary.txt"
+# Special config entry: test WIP from local-backup (not a remote branch).
+LOCAL_BRANCH = "local"
 ###############################################################################
 
 ##### Colours stuff for the print/branches at the end #########################
@@ -136,13 +139,19 @@ def read_info(path: Path) -> dict:
 
 
 def write_info(
-    path: Path, branch: str, sha: str, commit_date: str, pulled_at: str
+    path: Path,
+    branch: str,
+    sha: str,
+    commit_date: str,
+    pulled_at: str,
+    remote_ref: str | None = None,
 ) -> None:
+    ref = remote_ref if remote_ref is not None else f"origin/{branch}"
     path.write_text(
         "\n".join(
             [
                 f"branch: {branch}",
-                f"remote_ref: origin/{branch}",
+                f"remote_ref: {ref}",
                 f"commit: {sha}",
                 f"commit_short: {sha[:12]}",
                 f"commit_date: {commit_date}",
@@ -151,6 +160,17 @@ def write_info(
             ]
         )
     )
+
+
+def src_content_hash(src_dir: Path) -> str:
+    """Stable hash of all files under an hls/src tree (for local WIP skip detection)."""
+    h = hashlib.sha256()
+    for rel in sorted(iter_rel_files(src_dir)):
+        h.update(rel.encode())
+        h.update(b"\0")
+        h.update((src_dir / rel).read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
 
 
 def iter_rel_files(root: Path) -> set[str]:
@@ -305,6 +325,61 @@ def restore_local_src() -> int:
     return 0
 
 
+# Snapshot local-backup into branches/local/hls/src.
+# Returns True if a usable snapshot exists (archived or reused).
+def prepare_local_snapshot(force_archive: bool = False) -> bool:
+    if not BACKUP_DIR.is_dir() or not any(BACKUP_DIR.rglob("*")):
+        print(colour("WARNING  local-backup empty; cannot test 'local'", YELLOW))
+        return False
+
+    branch_dir = BRANCHES_DIR / LOCAL_BRANCH
+    src_dir = branch_dir / "hls" / "src"
+    info_path = branch_dir / "info.txt"
+    sha = src_content_hash(BACKUP_DIR)
+    prev = read_info(info_path)
+
+    if (
+        not force_archive
+        and prev.get("commit") == sha
+        and src_dir.is_dir()
+        and any(src_dir.iterdir())
+    ):
+        print(
+            f"  {LOCAL_BRANCH}: WIP matches snapshot "
+            f"({sha[:12]}) — skipping archive"
+        )
+        return True
+
+    print(f"  {LOCAL_BRANCH}: snapshotting local-backup @ {sha[:12]} ...")
+    if src_dir.exists():
+        shutil.rmtree(src_dir)
+    src_dir.mkdir(parents=True, exist_ok=True)
+    for rel in sorted(iter_rel_files(BACKUP_DIR)):
+        dst = src_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(
+            (BACKUP_DIR / rel).read_text(encoding="utf-8", errors="replace"),
+            encoding="utf-8",
+        )
+    write_info(
+        info_path,
+        LOCAL_BRANCH,
+        sha,
+        now_iso(),
+        now_iso(),
+        remote_ref="local-backup",
+    )
+    return True
+
+
+def local_matches_snapshot() -> bool:
+    info = read_info(BRANCHES_DIR / LOCAL_BRANCH / "info.txt")
+    sha = info.get("commit")
+    if not sha or not BACKUP_DIR.is_dir():
+        return False
+    return sha == src_content_hash(BACKUP_DIR)
+
+
 ##### Phase C: Apply branch sources to local hls/src ##########################
 # Swap matched file contents into local hls/src. Returns False if user declines after unmatched warning.
 
@@ -425,6 +500,8 @@ def has_test_results(branch: str) -> bool:
 
 
 def remote_matches_snapshot(branch: str) -> bool:
+    if branch == LOCAL_BRANCH:
+        return local_matches_snapshot()
     info = read_info(BRANCHES_DIR / safe_name(branch) / "info.txt")
     sha = info.get("commit")
     if not sha:
@@ -434,23 +511,42 @@ def remote_matches_snapshot(branch: str) -> bool:
 
 
 def full_run(wanted: list[str], force: bool = False) -> int:
-    _, _, _, selected = fetch_and_archive(wanted)
-    if not selected:
+    remotes = [b for b in wanted if b != LOCAL_BRANCH]
+    want_local = LOCAL_BRANCH in wanted
+
+    _, _, _, selected = fetch_and_archive(remotes)
+    if not selected and not want_local:
         print("No branches to test.")
         return 1
 
     backup_local_src()
     failed = False
     try:
-        for branch in selected:
+        if want_local:
+            if not prepare_local_snapshot(force_archive=force):
+                print(colour("WARNING  skipping local WIP tests", YELLOW))
+                want_local = False
+
+        # Preserve config order; only remotes that were selected (+ local).
+        selected_set = set(selected)
+        to_test = [
+            b for b in wanted if (b == LOCAL_BRANCH and want_local) or b in selected_set
+        ]
+
+        for branch in to_test:
             if (
                 not force
                 and remote_matches_snapshot(branch)
                 and has_test_results(branch)
             ):
+                reason = (
+                    "WIP unchanged and results exist"
+                    if branch == LOCAL_BRANCH
+                    else "remote unchanged and results exist"
+                )
                 print(
                     f"\n--- branch: {branch} ---\n"
-                    f"  remote unchanged and results exist — skipping tests "
+                    f"  {reason} — skipping tests "
                     f"(use --force to re-run)"
                 )
                 continue
@@ -840,8 +936,30 @@ def mode_list_remote() -> int:
     return 0
 
 
-# Force re-archive + re-test a single remote branch.
+# Force re-archive + re-test a single remote branch (or local WIP).
 def mode_run_branch(branch: str) -> int:
+    if branch == LOCAL_BRANCH:
+        print(f"Single-branch run: {LOCAL_BRANCH} (snapshot local-backup + tests)")
+        BRANCHES_DIR.mkdir(parents=True, exist_ok=True)
+        backup_local_src()
+        failed = False
+        try:
+            if not prepare_local_snapshot(force_archive=True):
+                return 1
+            if not apply_branch_sources(LOCAL_BRANCH):
+                return 1
+            rc = run_tests_for_branch(LOCAL_BRANCH)
+            if rc != 0:
+                failed = True
+                print(
+                    colour(f"WARNING  run_tests exited {rc} for {LOCAL_BRANCH}", YELLOW)
+                )
+            collect_artifacts(LOCAL_BRANCH)
+        finally:
+            print("\nRestoring local hls/src from backup...")
+            restore_local_src()
+        return 1 if failed else 0
+
     print(f"Single-branch run: {branch} (force archive + tests)")
     _, _, missing, selected = fetch_and_archive([branch], force_archive=True)
     if missing or not selected:
@@ -874,7 +992,8 @@ def parse_args(argv=None):
     p.add_argument(
         "--run-branch",
         metavar="NAME",
-        help="force re-fetch and re-test a single remote branch",
+        help="force re-fetch and re-test a single remote branch "
+        "(or 'local' for WIP from local-backup)",
     )
     p.add_argument(
         "--restore", action="store_true", help="restore local hls/src from local-backup"

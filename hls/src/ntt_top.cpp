@@ -10,16 +10,22 @@
   Makes it easier to tune. -Riley
 */
 
-// COEFF_INPUT_WIDTH: Number of coeffs copied in/out of local_r per cycle.
-//    reqs: must divide 256. e.g 8, 16, 32, 64
+// COEFF_INPUT_WIDTH: Number of coeffs copied in/out of local bufs per cycle.
+//    reqs: must divide 256. e.g 8, 16, 32, 64, 256
 //    def: Higher = fewer cycles, wider memory ports at the cost of more LUTs.
-//    notes: Setting this to 1 will make the design what it was originally/baseline.
-//           From my testing, 256 gives the best performance. After which it is diminishing returns.
+//    notes: Setting this to 1 is basically the old baseline copy style.
+//           256 has been the best.
 static const int COEFF_INPUT_WIDTH = 256;
+
+// BUTTERFLY_PAR: How many of the 128 butterflies run in parallel per stage.
+//    reqs: must divide 128. e.g. 4, 8, 16, 32, 64
+//    notes: 32 works best. 64 use heaps of DSPs. Only use if have plenty to spare.
+static const int BUTTERFLY_PAR = 32;
+static const int MEM_PAR = (BUTTERFLY_PAR * 2 > 256) ? 256 : (BUTTERFLY_PAR * 2);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-/* How the zetas table was generated (from the reference Kyber code):
+/* Code to generate zetas / zetas_inv (from the reference Kyber code):
 
 #define KYBER_ROOT_OF_UNITY 17
 
@@ -71,34 +77,107 @@ const ap_int<12> zetas[128] = {
    -108,  -308,   996,   991,   958, -1460,  1522,  1628
 };
 
-/*
- * Multiply then Montgomery-reduce: a * b * R^{-1} mod q.
- * Inlined + DSP-bound so HLS can fold this into the butterfly pipeline.
- */
+const ap_int<12> zetas_inv[128] = {
+     0,    758,   1517,    359,   -202,   -287,  -1422,  -1493,
+ -1468,   1474,   1202,   -962,   -182,  -1577,   -622,    171,
+  1571,    205,   -411,   1542,   -608,   -732,  -1017,    681,
+   130,   1602,  -1458,    829,   -383,   -264,   1325,   -573,
+  1275,   -677,   1065,   -448,    725,   1508,   -961,    398,
+   951,    247,   1421,   -107,   -830,    271,     90,    853,
+ -1469,   -126,   1162,   1618,    666,    320,      8,   -516,
+  1544,    282,  -1491,   1293,  -1015,    552,   -652,  -1223,
+ -1628,  -1522,   1460,   -958,   -991,   -996,    308,    108,
+  -478,    870,    854,   1510,   -794,   1278,   1530,   1185,
+  1659,   1187,   -220,    874,   1335,  -1218,    136,   1215,
+  -384,   1465,   1285,  -1322,   -610,   -603,  -1097,   -817,
+    75,    156,   -329,   -418,   -349,    872,   -644,   1590,
+ -1119,    602,  -1483,    777,    147,  -1159,   -778,    246,
+ -1653,  -1574,    460,    291,    235,   -177,   -587,   -422,
+  -105,  -1550,   -871,   1251,   -843,   -555,   -430,   1103,
+};
+
+/*************************************************
+* Name:        fqmul
+*
+* Description: Multiplication followed by Montgomery reduction
+*
+* Arguments:   - int16_t a: first factor
+*              - int16_t b: second factor
+*
+* Returns 16-bit integer congruent to a*b*R^{-1} mod q
+**************************************************/
 static int16_t fqmul(int16_t a, int16_t b) {
   #pragma HLS INLINE
-  return montgomery_reduce((int32_t)a*b);
+  return montgomery_reduce((int32_t)a * b);
 }
 
-
-template <int LEN>
-static void ntt_stage(int16_t local_r[256]) {
-  #pragma HLS INLINE off
-  for (int g = 0; g < 128 / LEN; g++) {
-    #pragma HLS UNROLL
-    int16_t zeta = zetas[128 / LEN + g];
-    int start = g * (LEN << 1);
-    for (int off = 0; off < LEN; off++) {
-      #pragma HLS PIPELINE II=1
-      #pragma HLS DEPENDENCE variable=local_r type=inter dependent=false
-      int j = start + off;
-      int16_t t = fqmul(zeta, local_r[j + LEN]);
-      local_r[j + LEN] = local_r[j] - t;
-      local_r[j] = local_r[j] + t;
+static void copy_coeffs_in(const int16_t src[256], int16_t dst[256]) {
+  copy_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
+    #pragma HLS PIPELINE II=1
+    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
+      #pragma HLS UNROLL
+      dst[i + t] = src[i + t];
     }
   }
 }
 
+static void copy_coeffs_out(const int16_t src[256], int16_t dst[256]) {
+  copy_out_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
+    #pragma HLS PIPELINE II=1
+    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
+      #pragma HLS UNROLL
+      dst[i + t] = src[i + t];
+    }
+  }
+}
+
+template <int LEN>
+static void ntt_stage(const int16_t in[256], int16_t out[256]) {
+  #pragma HLS INLINE off
+  for (int i = 0; i < 128; i++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=BUTTERFLY_PAR
+    int g     = i / LEN;
+    int off   = i % LEN;
+    int start = g * (LEN << 1);
+    int j     = start + off;
+    int16_t zeta = zetas[128 / LEN + g];
+
+    // Separate in/out avoids serialising the old inplace read/write pair
+    // (and the DEPENDENCE pragma that came with it).
+    int16_t a = in[j];
+    int16_t b = in[j + LEN];
+    int16_t t = fqmul(zeta, b);
+    out[j]       = a + t;
+    out[j + LEN] = a - t;
+  }
+}
+
+// Ping-pong through private buffers. local_in / local_out stay distinct so
+// HLS doesn't collapse the DATAFLOW region on a read/write feedback of r.
+static void ntt_dataflow(const int16_t local_in[256], int16_t local_out[256]) {
+  #pragma HLS DATAFLOW
+
+  int16_t buf1[256], buf2[256], buf3[256];
+  int16_t buf4[256], buf5[256], buf6[256];
+
+  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
+
+  ntt_stage<128>(local_in, buf1);
+  ntt_stage<64> (buf1, buf2);
+  ntt_stage<32> (buf2, buf3);
+  ntt_stage<16> (buf3, buf4);
+  ntt_stage<8>  (buf4, buf5);
+  ntt_stage<4>  (buf5, buf6);
+  ntt_stage<2>  (buf6, local_out);
+}
 
 /*************************************************
 * Name:        ntt
@@ -108,34 +187,63 @@ static void ntt_stage(int16_t local_r[256]) {
 *
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
-
 void ntt(int16_t r[256]) {
-  int16_t local_r[256];
-  #pragma HLS ARRAY_PARTITION variable=local_r complete dim=1
+  int16_t local_in[256];
+  int16_t local_out[256];
+  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
 
-  copy_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
+  copy_coeffs_in(r, local_in);
+  ntt_dataflow(local_in, local_out);
+  copy_coeffs_out(local_out, r);
+}
+
+template <int LEN, bool SCALE>
+static void invntt_stage(const int16_t in[256], int16_t out[256]) {
+  #pragma HLS INLINE off
+  const int16_t f = 1441; /* mont^2 / 128 */
+  for (int i = 0; i < 128; i++) {
     #pragma HLS PIPELINE II=1
-    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
-      #pragma HLS UNROLL
-      local_r[i + t] = r[i + t];
+    #pragma HLS UNROLL factor=BUTTERFLY_PAR
+    int g     = i / LEN;
+    int off   = i % LEN;
+    int start = g * (LEN << 1);
+    int j     = start + off;
+    int16_t zeta = zetas_inv[128 / LEN + g];
+    int16_t t = in[j];
+    int16_t b = in[j + LEN];
+    int16_t s = barrett_reduce(t + b);
+    int16_t d = fqmul(zeta, (int16_t)(t - b));
+    if (SCALE) {
+      s = fqmul(s, f);
+      d = fqmul(d, f);
     }
+    out[j]       = s;
+    out[j + LEN] = d;
   }
+}
 
-  ntt_stage<128>(local_r);
-  ntt_stage<64>(local_r);
-  ntt_stage<32>(local_r);
-  ntt_stage<16>(local_r);
-  ntt_stage<8>(local_r);
-  ntt_stage<4>(local_r);
-  ntt_stage<2>(local_r);
+static void invntt_dataflow(const int16_t local_in[256], int16_t local_out[256]) {
+  #pragma HLS DATAFLOW
 
-  copy_out_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
-    #pragma HLS PIPELINE II=1
-    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
-      #pragma HLS UNROLL
-      r[i + t] = local_r[i + t];
-    }
-  }
+  int16_t buf1[256], buf2[256], buf3[256];
+  int16_t buf4[256], buf5[256], buf6[256];
+  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
+
+  invntt_stage<2,   false>(local_in, buf1);
+  invntt_stage<4,   false>(buf1, buf2);
+  invntt_stage<8,   false>(buf2, buf3);
+  invntt_stage<16,  false>(buf3, buf4);
+  invntt_stage<32,  false>(buf4, buf5);
+  invntt_stage<64,  false>(buf5, buf6);
+  invntt_stage<128, true> (buf6, local_out);
 }
 
 /*************************************************
@@ -148,35 +256,96 @@ void ntt(int16_t r[256]) {
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
 void invntt(int16_t r[256]) {
-  unsigned int start, len, j, k;
-  int16_t t, zeta;
-  const int16_t f = 1441; /* mont^2 / 128 */
+  int16_t local_in[256];
+  int16_t local_out[256];
+  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
 
-  k = 127;
-  for (len = 2; len <= 128; len <<= 1) {
-    for (start = 0; start < 256; start = j + len) {
-      zeta = zetas[k--];
-      for (j = start; j < start + len; j++) {
-        t = r[j];
-        r[j] = barrett_reduce(t + r[j + len]);
-        r[j + len] = r[j + len] - t;
-        r[j + len] = fqmul(zeta, r[j + len]);
-      }
-    }
-  }
-
-  for (j = 0; j < 256; j++)
-    r[j] = fqmul(r[j], f);
+  copy_coeffs_in(r, local_in);
+  invntt_dataflow(local_in, local_out);
+  copy_coeffs_out(local_out, r);
 }
 
-/*
- * Multiply two degree-1 polys in Zq[X] / (X^2 - zeta).
- * Used for pointwise products once you're in the NTT domain.
- */
+/*************************************************
+* Name:        basemul
+*
+* Description: Multiplication of polynomials in Zq[X]/(X^2-zeta)
+*              used for multiplication of elements in Rq in NTT domain
+*
+* Arguments:   - int16_t r[2]: pointer to the output polynomial
+*              - const int16_t a[2]: pointer to the first factor
+*              - const int16_t b[2]: pointer to the second factor
+*              - int16_t zeta: integer defining the reduction polynomial
+**************************************************/
 void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta) {
-  r[0] = fqmul(a[1], b[1]);
-  r[0] = fqmul(r[0], zeta);
+  #pragma HLS INLINE
+  r[0]  = fqmul(a[1], b[1]);
+  r[0]  = fqmul(r[0], zeta);
   r[0] += fqmul(a[0], b[0]);
-  r[1] = fqmul(a[0], b[1]);
+  r[1]  = fqmul(a[0], b[1]);
   r[1] += fqmul(a[1], b[0]);
+}
+
+void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+  for (int i = 0; i < 64; i++) {
+    int16_t z = (int16_t)zetas[64 + i];
+    basemul(&r[4 * i],     &a[4 * i],     &b[4 * i],      z);
+    basemul(&r[4 * i + 2], &a[4 * i + 2], &b[4 * i + 2], -z);
+  }
+}
+
+void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+  for (int i = 0; i < 256; i++)
+    r[i] = a[i] + b[i];
+}
+
+void hls_poly_reduce(int16_t r[256]) {
+  for (int i = 0; i < 256; i++)
+    r[i] = barrett_reduce(r[i]);
+}
+
+void hls_polyvec_basemul_acc(int16_t r[256],
+                             const int16_t a[KYBER_K][256],
+                             const int16_t b[KYBER_K][256]) {
+  int16_t t[256];
+  hls_poly_basemul(r, a[0], b[0]);
+  for (int i = 1; i < KYBER_K; i++) {
+    hls_poly_basemul(t, a[i], b[i]);
+    hls_poly_add(r, r, t);
+  }
+  hls_poly_reduce(r);
+}
+
+void hls_matvec_ntt(int16_t out[KYBER_K + 1][256],
+                    const int16_t A[KYBER_K + 1][KYBER_K][256],
+                    const int16_t s_hat[KYBER_K][256]) {
+  for (int i = 0; i < KYBER_K + 1; i++)
+    hls_polyvec_basemul_acc(out[i], A[i], s_hat);
+}
+
+/*************************************************
+* Name:        hls_poly_tomont
+*
+* Description: Converts a polynomial to Montgomery domain, i.e. multiplies
+*              every coefficient by R = 2^16 mod q.
+*
+*              Needed ONLY where a base multiply is not followed by an
+*              inverse NTT. Normally inverse NTT will contain a multiple by R
+*              due to fqmul, however in key generation this is not the case
+**************************************************/
+void hls_poly_tomont(int16_t r[256]) {
+  const int16_t f = 1353; /* R^2 mod q, where R = 2^16 */
+  for (int i = 0; i < 256; i++)
+    r[i] = montgomery_reduce((int32_t)r[i] * f);
+}
+
+/*************************************************
+* Name:        hls_poly_sub
+*
+* Description: r = a - b, coefficient-wise
+*              Used in decryption, doesn't auto reduce
+**************************************************/
+void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+  for (int i = 0; i < 256; i++)
+    r[i] = a[i] - b[i];
 }

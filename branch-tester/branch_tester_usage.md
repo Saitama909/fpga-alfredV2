@@ -6,7 +6,17 @@ Run from the repo root:
 python3 branch-tester/run_branch_tests.py [flags]
 ```
 
-With **no flags**, the tool runs the full flow for every branch in.
+With **no flags**, the tool runs the full flow for every branch in
+`branch-tester/config.json` → `test_branches`.
+
+Special entry **`"local"`**: not a remote. Snapshots your current `hls/src`
+(via `local-backup`) into `branches/local/`, runs the harness on it, and
+includes a `local` column in `--compare`. Omit `"local"` from the config to
+skip WIP testing. You can also force it with:
+
+```bash
+python3 branch-tester/run_branch_tests.py --run-branch local
+```
 
 ---
 
@@ -72,7 +82,7 @@ Before each branch’s `testing/run_tests.py` run, the tool wipes the shared Vit
 
 ### `--restore`
 
-Incase something effs up, or you cancel the run while its operating, use the following command to automatically restore your work from before the test ran. 
+Incase something effs up, or you cancel the run while its operating, use the following command to automatically restore your work from before the test ran.
 
 Rewrite local `hls/src` file **contents** from `branch-tester/local-backup/` symlink-safe; does not replace files/inodes).
 
@@ -87,4 +97,3 @@ Prompt `Y/N`, then delete `branch-tester/branches/` (recreates an empty folder).
 ```bash
 python3 branch-tester/run_branch_tests.py --delete-local
 ```
-

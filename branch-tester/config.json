@@ -1,13 +1,11 @@
 {
   "test_branches": [
+    "local",
     "adi-testing",
     "jovan-mvp",
     "main",
     "riley-test-suite",
     "riley-testing",
-    "william-testing",
-    "william_dataflow_opt",
-    "william_full_kyber", 
-    "william_inv_zeta_precompute"
+    "william_full_kyber"
   ]
 }
