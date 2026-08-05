@@ -301,7 +301,9 @@
   static void copy_poly(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
     for (int i = 0; i < 256; i++) {
-      // TODO: PIPELINE II=1 + UNROLL factor=8 -> 32 cycles instead of 256.
+      // 8 coefficients per cycle: needs the caller's buffers cyclic-8 partitioned
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=8
       out[i] = in[i];
     }
   }
@@ -324,8 +326,11 @@
   **************************************************/
   void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
     int16_t ta[256], tb[256], tr[256];
-    // TODO: ARRAY_PARTITION ta/tb/tr cyclic factor=8, and match it on the r
-    // argument of ntt/invntt, so the stages aren't limited to a 2-port BRAM.
+    #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=8 dim=1
+    // TODO (step 1b): if the report shows a copy appearing where these meet the
+    // unpartitioned r argument of ntt/invntt, partition that argument to match.
 
     copy_poly(a, ta);
     copy_poly(b, tb);
