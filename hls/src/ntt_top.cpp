@@ -126,6 +126,8 @@
   **************************************************/
 
   void ntt(int16_t r[256]) {
+    // Keep as a sub-block so poly_mul can reuse it. inlining it would merge its DATAFLOW region into the caller.
+    #pragma HLS INLINE off
     #pragma HLS DATAFLOW
 
     int16_t buf1[256], buf2[256], buf3[256];
@@ -183,6 +185,7 @@
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
   void invntt(int16_t r[256]) {
+    #pragma HLS INLINE off
     #pragma HLS DATAFLOW
     // no partition on r
 
