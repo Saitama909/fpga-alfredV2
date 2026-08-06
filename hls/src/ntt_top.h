@@ -17,7 +17,8 @@ void ntt(int16_t poly[256]);
 #define invntt KYBER_NAMESPACE(invntt)
 void invntt(int16_t poly[256]);
 
-void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta);
+void basemul(int16_t a0, int16_t a1, int16_t b0, int16_t b1,
+             int16_t zeta, int16_t &r0, int16_t &r1);
 
 void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]);
 void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]);
