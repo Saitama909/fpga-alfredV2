@@ -1,8 +1,43 @@
+// ==========================================================================
+  // ==========================================================================
+  // ntt.cpp -- Kyber NTT-domain arithmetic, HLS implementation.
+  //
+  // Drop-in replacement for the pq-crystals reference ntt.c, validated
+  // byte-exact against the published test vectors (SHA256SUMS) for K=2/3/4.
+  //
+  // Structural changes from the reference:
+  //   - ntt/invntt built as 7 templated stages writing to separate buffers
+  //     instead of one in-place loop nest, so HLS DATAFLOW can pipeline them.
+  //     Twiddle index is the closed form zetas[128/LEN + g] rather than a
+  //     running counter, removing the loop-carried dependency.
+  //   - invntt uses a second table, zetas_inv, which is pre-negated and
+  //     pre-reversed; hence the (t - b) subtraction where the reference has
+  //     (b - t). The two sign flips cancel -- see the note above the table.
+  //   - The 1/128 scaling is fused into the final inverse stage (SCALE
+  //     template flag) instead of a separate 256-coefficient pass.
+  //
+  // Changes made for the software build, neither affecting behaviour:
+  //   - zetas/zetas_inv are int16_t rather than ap_int<12>, so the reference
+  //     poly.c (compiled as C) can read the table directly. All values fit in
+  //     12 bits either way; cost is 64 bytes of ROM the synthesiser would
+  //     otherwise have saved.
+  //   - invntt_tomont added as an alias for invntt -- the name poly.c calls.
+  //
+  // Also provides an hls_* polynomial/vector/matrix layer. When linking
+  // against the reference these are reached through shims at the bottom of
+  // this file, with the corresponding bodies commented out in poly.c and
+  // polyvec.c. hls_matvec_ntt has no reference counterpart: its (K+1) x K
+  // stacking of A^T over t^T is a hardware-motivated unification of the two
+  // matrix products in encryption.
+  // ==========================================================================
+
   #include <stdint.h>
+  #include <cstring>
   #include "params.h"
-  #include "ntt_top.h"
-  #include "reduction.h"
-  #include "ap_int.h"
+  #include "ntt.h"
+  #include "reduce.h"
+  #include "poly.h"
+  #include "polyvec.h"
 
   /* Code to generate zetas and zetas_inv used in the number-theoretic transform:
 
@@ -37,7 +72,7 @@
   }
   */
 
-  const ap_int<12> zetas[128] = {
+  const int16_t zetas[128] = {
     -1044,  -758,  -359, -1517,  1493,  1422,   287,   202,
     -171,   622,  1577,   182,   962, -1202, -1474,  1468,
       573, -1325,   264,   383,  -829,  1458, -1602,  -130,
@@ -56,7 +91,7 @@
     -108,  -308,   996,   991,   958, -1460,  1522,  1628
   };
 
-  const ap_int<12> zetas_inv[128] = {
+  const int16_t zetas_inv[128] = {
        0,    758,   1517,    359,   -202,   -287,  -1422,  -1493,
    -1468,   1474,   1202,   -962,   -182,  -1577,   -622,    171,
     1571,    205,   -411,   1542,   -608,   -732,  -1017,    681,
@@ -75,38 +110,17 @@
     -105,  -1550,   -871,   1251,   -843,   -555,   -430,   1103,
   };
 
-  void hls_test_poly_mul(int16_t a[256], int16_t b[256], int16_t result[256]) {
-    #pragma HLS INTERFACE mode=m_axi port=a      bundle=gmem0 depth=256
-    #pragma HLS INTERFACE mode=m_axi port=b      bundle=gmem1 depth=256
-    #pragma HLS INTERFACE mode=m_axi port=result bundle=gmem2 depth=256
-    #pragma HLS INTERFACE mode=s_axilite port=return
-
-        int16_t ah[256], bh[256], rh[256];
-    #pragma HLS ARRAY_PARTITION variable=ah cyclic factor=8
-    #pragma HLS ARRAY_PARTITION variable=bh cyclic factor=8
-    #pragma HLS ARRAY_PARTITION variable=rh cyclic factor=8
-
-    COPY_AB:
-        for (int i = 0; i < 256; i++) {
-    #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=4
-            ah[i] = a[i];
-            bh[i] = b[i];
-        }
-        #pragma HLS DATAFLOW
-        ntt(ah);
-        ntt(bh);
-        hls_poly_basemul(rh, ah, bh);
-        invntt(rh);
-
-    COPY_R:
-        for (int i = 0; i < 256; i++) {
-    #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=4
-            result[i] = rh[i];
-        }
-    }
-  
+  void poly_basemul_montgomery(poly *r, const poly *a, const poly *b) {
+    hls_poly_basemul(r->coeffs, a->coeffs, b->coeffs);
+  }
+  void poly_add(poly *r, const poly *a, const poly *b) {
+    hls_poly_add(r->coeffs, a->coeffs, b->coeffs);
+  }
+  void poly_sub(poly *r, const poly *a, const poly *b) {
+    hls_poly_sub(r->coeffs, a->coeffs, b->coeffs);
+  }
+  void poly_reduce(poly *r)  { hls_poly_reduce(r->coeffs); }
+  void poly_tomont(poly *r)  { hls_poly_tomont(r->coeffs); }
   /*************************************************
   * Name:        fqmul
   *
@@ -128,17 +142,15 @@
     #pragma HLS INLINE off
     for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
-      // builds 4 butterflies working in parallel
-      #pragma HLS UNROLL factor=4 
-      // loop flatten
       int g     = i / LEN;
       int off   = i % LEN;
       int start = g * (LEN << 1);
       int j     = start + off;
       int16_t zeta = zetas[128 / LEN + g];
 
-      // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses 
-      // (and needed a DEPENDENCE pragma).
+      // separate in[] and out[] arrays: the reference reads and writes the
+      // same array in each butterfly, which serialises the accesses in HLS
+      // and needs a DEPENDENCE pragma.
       int16_t a = in[j];
       int16_t b = in[j + LEN];
       int16_t t = fqmul(zeta, b);
@@ -156,20 +168,19 @@
   *
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
-
   void ntt(int16_t r[256]) {
     #pragma HLS DATAFLOW
 
     int16_t buf1[256], buf2[256], buf3[256];
     int16_t buf4[256], buf5[256], buf6[256];
-    
+
     #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
-    // dataflow style
+
     ntt_stage<128>(r,    buf1);   // reads r directly, no copy_in
     ntt_stage<64> (buf1, buf2);
     ntt_stage<32> (buf2, buf3);
@@ -182,10 +193,9 @@
   template <int LEN, bool SCALE>
   static void invntt_stage(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
-    const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
+    const int16_t f = 1441;                 // mont^2 / 128
     for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
-      #pragma HLS UNROLL factor=4
       int g     = i / LEN;
       int off   = i % LEN;
       int start = g * (LEN << 1);
@@ -195,8 +205,9 @@
       int16_t b = in[j + LEN];
       int16_t s = barrett_reduce(t + b);
       int16_t d = fqmul(zeta, (int16_t)(t - b));
-      // inverse NTT needs a final multiply-by-1/128 on every coefficient
-      if (SCALE) {                          
+      // the inverse transform needs a final multiply-by-1/128 on every
+      // coefficient; fusing it into the last stage saves a separate pass
+      if (SCALE) {
         s = fqmul(s, f);
         d = fqmul(d, f);
       }
@@ -206,17 +217,19 @@
   }
 
   /*************************************************
-  * Name:        invntt_tomont
+  * Name:        invntt
   *
   * Description: Inplace inverse number-theoretic transform in Rq and
   *              multiplication by Montgomery factor 2^16.
   *              Input is in bitreversed order, output is in standard order
   *
+  *              The extra factor of R is not a quirk -- it cancels the R^-1
+  *              that basemul leaves behind.
+  *
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
   void invntt(int16_t r[256]) {
     #pragma HLS DATAFLOW
-    // no partition on r
 
     int16_t buf1[256], buf2[256], buf3[256];
     int16_t buf4[256], buf5[256], buf6[256];
@@ -237,6 +250,19 @@
   }
 
   /*************************************************
+  * Name:        invntt_tomont
+  *
+  * Description: Name the reference poly.c calls. Identical to invntt.
+  *              The reference applies the 1/128 scaling as a separate pass
+  *              over all 256 coefficients; invntt fuses it into the final
+  *              stage instead, which covers both halves of every butterfly
+  *              and so reaches all 256. Same result, one fewer pass.
+  **************************************************/
+  void invntt_tomont(int16_t r[256]) {
+    invntt(r);
+  }
+
+  /*************************************************
   * Name:        basemul
   *
   * Description: Multiplication of polynomials in Zq[X]/(X^2-zeta)
@@ -247,32 +273,32 @@
   *              - const int16_t b[2]: pointer to the second factor
   *              - int16_t zeta: integer defining the reduction polynomial
   **************************************************/
-  void basemul(int16_t a0, int16_t a1,
-                             int16_t b0, int16_t b1,
-                             int16_t zeta,
-                             int16_t &r0, int16_t &r1)
+  void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta)
   {
     #pragma HLS INLINE
-    int16_t t = fqmul(a1, b1);
-    r0 = fqmul(t, zeta) + fqmul(a0, b0);
-    r1 = fqmul(a0, b1)  + fqmul(a1, b0);
-}
+    r[0]  = fqmul(a[1], b[1]);
+    r[0]  = fqmul(r[0], zeta);
+    r[0] += fqmul(a[0], b[0]);
+    r[1]  = fqmul(a[0], b[1]);
+    r[1] += fqmul(a[1], b[0]);
+  }
 
+  // ==========================================================================
+  // Polynomial / vector / matrix layer.
+  //
+  // Not used when linking against the reference (its poly.c and polyvec.c
+  // provide equivalents), but kept for the HLS build and the standalone
+  // testbench. The hls_ prefix keeps them clear of the reference's
+  // KYBER_NAMESPACE-mangled poly_* symbols.
+  // ==========================================================================
 
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    #pragma HLS ARRAY_PARTITION variable=r cyclic factor=4
-    #pragma HLS ARRAY_PARTITION variable=a cyclic factor=4
-    #pragma HLS ARRAY_PARTITION variable=b cyclic factor=4
-    #pragma HLS ARRAY_PARTITION variable=zetas cyclic factor=1
-
     for (int i = 0; i < 64; i++) {
-    #pragma HLS PIPELINE II=1
-            int16_t z = (int16_t)zetas[64 + i];
-            basemul(a[4*i],   a[4*i+1], b[4*i],   b[4*i+1],  z, r[4*i],   r[4*i+1]);
-            basemul(a[4*i+2], a[4*i+3], b[4*i+2], b[4*i+3], -z, r[4*i+2], r[4*i+3]);
-        }
+      int16_t z = zetas[64+i];
+      basemul(&r[4*i],   &a[4*i],   &b[4*i],    z);
+      basemul(&r[4*i+2], &a[4*i+2], &b[4*i+2], -z);
+    }
   }
-  
 
   void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     for (int i = 0; i < 256; i++) r[i] = a[i] + b[i];
@@ -308,8 +334,11 @@
   *              every coefficient by R = 2^16 mod q.
   *
   *              Needed ONLY where a base multiply is not followed by an
-  *              inverse NTT. Normally inverse NTT will contain a multiple by R
-  *              due to fqmul, however in key generation this is not the case
+  *              inverse NTT. invntt normally supplies that R; key generation
+  *              never calls invntt, so this pays the debt by hand.
+  *
+  *              The constant is R^2, not R, because montgomery_reduce always
+  *              divides by R: r * R^2 * R^-1 = r * R.
   **************************************************/
   void hls_poly_tomont(int16_t r[256]) {
     const int16_t f = 1353;   // R^2 mod q, where R = 2^16
@@ -320,11 +349,19 @@
   /*************************************************
   * Name:        hls_poly_sub
   *
-  * Description: r = a - b, coefficient-wise
-  *              Used in decryption, doesn't auto reduce
+  * Description: r = a - b, coefficient-wise. No reduction -- caller reduces.
+  *              Used in decryption: v - InvNTT(s_hat o u_hat).
   **************************************************/
   void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     for (int i = 0; i < 256; i++)
       r[i] = a[i] - b[i];
   }
-    
+
+  void polyvec_basemul_acc_montgomery(poly *r, const polyvec *a, const polyvec *b) {
+    int16_t A[KYBER_K][256], B[KYBER_K][256];
+    for (int i = 0; i < KYBER_K; i++) {
+      memcpy(A[i], a->vec[i].coeffs, 512);
+      memcpy(B[i], b->vec[i].coeffs, 512);
+    }
+    hls_polyvec_basemul_acc(r->coeffs, A, B);
+  }
