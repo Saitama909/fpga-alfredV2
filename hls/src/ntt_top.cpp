@@ -75,6 +75,38 @@
     -105,  -1550,   -871,   1251,   -843,   -555,   -430,   1103,
   };
 
+  void hls_test_poly_mul(int16_t a[256], int16_t b[256], int16_t result[256]) {
+    #pragma HLS INTERFACE mode=m_axi port=a      bundle=gmem0 depth=256
+    #pragma HLS INTERFACE mode=m_axi port=b      bundle=gmem1 depth=256
+    #pragma HLS INTERFACE mode=m_axi port=result bundle=gmem2 depth=256
+    #pragma HLS INTERFACE mode=s_axilite port=return
+
+        int16_t ah[256], bh[256], rh[256];
+    #pragma HLS ARRAY_PARTITION variable=ah cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=bh cyclic factor=8
+    #pragma HLS ARRAY_PARTITION variable=rh cyclic factor=8
+
+    COPY_AB:
+        for (int i = 0; i < 256; i++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=4
+            ah[i] = a[i];
+            bh[i] = b[i];
+        }
+        #pragma HLS DATAFLOW
+        ntt(ah);
+        ntt(bh);
+        hls_poly_basemul(rh, ah, bh);
+        invntt(rh);
+
+    COPY_R:
+        for (int i = 0; i < 256; i++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=4
+            result[i] = rh[i];
+        }
+    }
+  
   /*************************************************
   * Name:        fqmul
   *
@@ -215,24 +247,32 @@
   *              - const int16_t b[2]: pointer to the second factor
   *              - int16_t zeta: integer defining the reduction polynomial
   **************************************************/
-  void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta)
+  void basemul(int16_t a0, int16_t a1,
+                             int16_t b0, int16_t b1,
+                             int16_t zeta,
+                             int16_t &r0, int16_t &r1)
   {
     #pragma HLS INLINE
-    r[0]  = fqmul(a[1], b[1]);
-    r[0]  = fqmul(r[0], zeta);
-    r[0] += fqmul(a[0], b[0]);
-    r[1]  = fqmul(a[0], b[1]);
-    r[1] += fqmul(a[1], b[0]);
-  }
+    int16_t t = fqmul(a1, b1);
+    r0 = fqmul(t, zeta) + fqmul(a0, b0);
+    r1 = fqmul(a0, b1)  + fqmul(a1, b0);
+}
 
 
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+    #pragma HLS ARRAY_PARTITION variable=r cyclic factor=4
+    #pragma HLS ARRAY_PARTITION variable=a cyclic factor=4
+    #pragma HLS ARRAY_PARTITION variable=b cyclic factor=4
+    #pragma HLS ARRAY_PARTITION variable=zetas cyclic factor=1
+
     for (int i = 0; i < 64; i++) {
-      int16_t z = (int16_t)zetas[64+i];
-      basemul(&r[4*i],   &a[4*i],   &b[4*i],    z);
-      basemul(&r[4*i+2], &a[4*i+2], &b[4*i+2], -z);
-    }
+    #pragma HLS PIPELINE II=1
+            int16_t z = (int16_t)zetas[64 + i];
+            basemul(a[4*i],   a[4*i+1], b[4*i],   b[4*i+1],  z, r[4*i],   r[4*i+1]);
+            basemul(a[4*i+2], a[4*i+3], b[4*i+2], b[4*i+3], -z, r[4*i+2], r[4*i+3]);
+        }
   }
+  
 
   void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     for (int i = 0; i < 256; i++) r[i] = a[i] + b[i];
@@ -287,3 +327,4 @@
     for (int i = 0; i < 256; i++)
       r[i] = a[i] - b[i];
   }
+    

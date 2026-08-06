@@ -32,4 +32,5 @@ void hls_matvec_ntt(int16_t out[KYBER_K+1][256],
                     const int16_t s_hat[KYBER_K][256]);
 void hls_poly_tomont(int16_t r[256]);
 void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]);
+  void hls_test_poly_mul(int16_t a[256], int16_t b[256], int16_t result[256]);
 #endif /* NTT_TOP_H */
