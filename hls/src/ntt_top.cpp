@@ -324,6 +324,8 @@
   *              - int16_t r[256]: output polynomial
   **************************************************/
   void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
+    #pragma HLS DATAFLOW
+
     int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
     #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
@@ -335,7 +337,8 @@
     copy_poly(a, ta);
     copy_poly(b, tb);
 
-    // one shared ntt instance serves both calls
+    // separate processes under DATAFLOW, so these should run concurrently as two
+    // instances rather than sharing one
     ntt(ta, na);
     ntt(tb, nb);
 
