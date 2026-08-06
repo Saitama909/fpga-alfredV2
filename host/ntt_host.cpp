@@ -3,11 +3,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <xrt/xrt_device.h>
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_kernel.h>
 
-// Software Reference NTT (Kyber-768)
+// Kyber-768 NTT Constant Zeta Table
 static const int16_t zetas[128] = {
     -1044,  -758,   -64, -1011,  -313, -1009,   657, -1453,
      1078,  -554,  -242,   -56,  1023, -1198,   641,  1110,
@@ -51,16 +52,15 @@ static void ntt_ref(int16_t r[256]) {
     }
 }
 
-// Baseline Host Scheduler - we only do one polynomial at once. 
-// Submits 1 polynomial at a time via synchronous xrt::run::wait() calls
+// Batch Payload buffer with 128 NTTs per batch / 64k
 int main(int argc, char** argv) {
     std::string xclbin_path = (argc > 1) ? argv[1] : "ntt_dataflow_200mhz.xclbin";
-    size_t total_jobs = (argc > 2) ? std::stoul(argv[2]) : 1000;
+    size_t total_jobs = (argc > 2) ? std::stoul(argv[2]) : 10000;
 
     std::cout << "=======================================================\n";
-    std::cout << " Unoptimized Baseline Synchronous Host Scheduler      \n";
     std::cout << " Target Bitstream: " << xclbin_path << "\n";
     std::cout << " Total Workload  : " << total_jobs << " NTT jobs\n";
+    std::cout << " Batch Size      : 128 NTTs per payload (64 KB)\n";
     std::cout << "=======================================================\n";
 
     // Initialize XRT Device and Kernel
@@ -68,46 +68,57 @@ int main(int argc, char** argv) {
     auto uuid = device.load_xclbin(xclbin_path);
     xrt::kernel kernel(device, uuid, "ntt_accel");
 
-    // 2. Allocate buffer for 1 polynomial
-    xrt::bo bo_in(device, 256 * sizeof(int16_t), kernel.group_id(0));
-    int16_t* host_ptr = bo_in.map<int16_t*>();
+    // Allocate contiguous 64KB buffer for 128 NTTs
+    size_t batch_size = 128;
+    size_t batch_bytes = batch_size * 256 * sizeof(int16_t);
+    xrt::bo bo_batch(device, batch_bytes, xrt::bo::flags::normal, kernel.group_id(0));
+    int16_t* batch_ptr = bo_batch.map<int16_t*>();
 
+    size_t num_batches = total_jobs / batch_size;
     int errors = 0;
+
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // 3. Synchronous loop submitting 1 NTT per driver call
-    for (size_t job = 0; job < total_jobs; ++job) {
-        int16_t expected[256];
-        for (int i = 0; i < 256; ++i) {
-            host_ptr[i] = (i * 13 + job) % 3329;
-            expected[i] = host_ptr[i];
+    for (size_t b = 0; b < num_batches; ++b) {
+        std::vector<std::vector<int16_t>> expected_batch(batch_size, std::vector<int16_t>(256));
+
+        // Populate the NTTs
+        for (size_t k = 0; k < batch_size; ++k) {
+            for (int i = 0; i < 256; ++i) {
+                int16_t val = (i * 7 + b * 128 + k) % 3329;
+                batch_ptr[k * 256 + i] = val;
+                expected_batch[k][i] = val;
+            }
         }
 
-        bo_in.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+        bo_batch.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        // Blocks thread on Linux kernel driver context switches on every single call
-        auto run = kernel(bo_in);
+        // Submit 128 NTTs in one go so we save all that overhead
+        auto run = kernel(bo_batch);
         run.wait();
 
-        bo_in.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+        bo_batch.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
 
         // Verify against CPU reference NTT
-        ntt_ref(expected);
-        for (int i = 0; i < 256; ++i) {
-            if (host_ptr[i] != expected[i]) {
-                errors++;
-                break;
+        for (size_t k = 0; k < batch_size; ++k) {
+            ntt_ref(expected_batch[k].data());
+            for (int i = 0; i < 256; ++i) {
+                if (batch_ptr[k * 256 + i] != expected_batch[k][i]) {
+                    errors++;
+                    break;
+                }
             }
         }
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     double total_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
+    size_t executed_jobs = num_batches * batch_size;
 
     std::cout << "\n=======================================================\n";
-    std::cout << " Result                      : " << (errors == 0 ? "PASS (100% Correct)" : "FAIL") << "\n";
-    std::cout << " Baseline Synchronous Latency: " << (total_us / total_jobs) << " us / NTT\n";
-    std::cout << " Sustained Throughput        : " << (total_jobs / (total_us / 1e6)) << " NTTs / sec\n";
+    std::cout << " Result               : " << (errors == 0 ? "PASS (100% Correct)" : "FAIL") << "\n";
+    std::cout << " Latency with 128NTT batched   : " << std::fixed << std::setprecision(3) << (total_us / executed_jobs) << " us / NTT\n";
+    std::cout << " Sustained Throughput : " << std::setprecision(1) << (executed_jobs / (total_us / 1e6)) << " NTTs / sec\n";
     std::cout << "=======================================================\n";
 
     return 0;
