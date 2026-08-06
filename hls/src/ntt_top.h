@@ -12,10 +12,10 @@ extern const ap_int<12> zetas[128];
 extern const ap_int<12> zetas_inv[128];
 
 #define ntt KYBER_NAMESPACE(ntt)
-void ntt(int16_t poly[256]);
+void ntt(const int16_t in[256], int16_t out[256]); // made out-of-place to enable dataflow
 
 #define invntt KYBER_NAMESPACE(invntt)
-void invntt(int16_t poly[256]);
+void invntt(const int16_t in[256], int16_t out[256]);
 
 void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta);
 

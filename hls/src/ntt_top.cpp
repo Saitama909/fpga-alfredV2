@@ -125,7 +125,7 @@
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
 
-  void ntt(int16_t r[256]) {
+  void ntt(const int16_t in[256], int16_t out[256]) {
     // Keep as a sub-block so poly_mul can reuse it. inlining it would merge its DATAFLOW region into the caller.
     #pragma HLS INLINE off
     #pragma HLS DATAFLOW
@@ -140,13 +140,13 @@
     #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
     // dataflow style
-    ntt_stage<128>(r,    buf1);   // reads r directly, no copy_in
+    ntt_stage<128>(in,   buf1);
     ntt_stage<64> (buf1, buf2);
     ntt_stage<32> (buf2, buf3);
     ntt_stage<16> (buf3, buf4);
     ntt_stage<8>  (buf4, buf5);
     ntt_stage<4>  (buf5, buf6);
-    ntt_stage<2>  (buf6, r);      // writes r directly, no copy_out
+    ntt_stage<2>  (buf6, out);
   }
 
   template <int LEN, bool SCALE>
@@ -184,10 +184,9 @@
   *
   * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
   **************************************************/
-  void invntt(int16_t r[256]) {
+  void invntt(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
     #pragma HLS DATAFLOW
-    // no partition on r
 
     int16_t buf1[256], buf2[256], buf3[256];
     int16_t buf4[256], buf5[256], buf6[256];
@@ -198,13 +197,13 @@
     #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
 
-    invntt_stage<2,   false>(r,    buf1);   // reads r directly, no copy_in
+    invntt_stage<2,   false>(in,   buf1);
     invntt_stage<4,   false>(buf1, buf2);
     invntt_stage<8,   false>(buf2, buf3);
     invntt_stage<16,  false>(buf3, buf4);
     invntt_stage<32,  false>(buf4, buf5);
     invntt_stage<64,  false>(buf5, buf6);
-    invntt_stage<128, true> (buf6, r);      // writes r directly + applies 1/128
+    invntt_stage<128, true> (buf6, out);    // applies the 1/128 scaling
   }
 
   /*************************************************
@@ -325,22 +324,23 @@
   *              - int16_t r[256]: output polynomial
   **************************************************/
   void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
-    int16_t ta[256], tb[256], tr[256];
+    int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
     #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=na cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=8 dim=1
-    // TODO (step 1b): if the report shows a copy appearing where these meet the
-    // unpartitioned r argument of ntt/invntt, partition that argument to match.
+    #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=8 dim=1
 
     copy_poly(a, ta);
     copy_poly(b, tb);
 
-    // TODO: check the report for one shared ntt instance, or two and decide if we want to duplicate it for throughput
-    ntt(ta);
-    ntt(tb);
+    // one shared ntt instance serves both calls
+    ntt(ta, na);
+    ntt(tb, nb);
 
-    hls_poly_basemul(tr, ta, tb);
-    invntt(tr);
+    hls_poly_basemul(tr, na, nb);
+    invntt(tr, ti);
 
-    copy_poly(tr, r);
+    copy_poly(ti, r);
   }
