@@ -17,7 +17,8 @@ void ntt(const int16_t in[256], int16_t out[256]); // made out-of-place to enabl
 #define invntt KYBER_NAMESPACE(invntt)
 void invntt(const int16_t in[256], int16_t out[256]);
 
-void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta);
+void basemul(int16_t a0, int16_t a1, int16_t b0, int16_t b1,
+             int16_t zeta, int16_t &r0, int16_t &r1);
 
 void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]);
 void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]);
@@ -38,4 +39,5 @@ void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]);
 #define poly_mul KYBER_NAMESPACE(poly_mul)
 void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]);
 
+  void hls_test_poly_mul(int16_t a[256], int16_t b[256], int16_t result[256]);
 #endif /* NTT_TOP_H */
