@@ -24,7 +24,7 @@ CPPFLAGS += -DKYBER_K=3 -I$(KYBER)
 OBJS = bench_poly_mul.o ntt.o reduce.o
 
 bench_poly_mul: $(OBJS)
-	$(CXX) -o $@ $(OBJS)
+	$(CXX) -o $@ $(OBJS) $(LDFLAGS)
 
 bench_poly_mul.o: bench_poly_mul.cpp
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c -o $@ $<

@@ -37,6 +37,20 @@ constexpr int RUNS  = 21;    // batches; median is reported
 
 using clk = std::chrono::steady_clock;
 
+/* Kernel figures to compare against, in cycles at 200 MHz. TODO: these are transcribed from the reports. 
+   we should either integrate this into the host file and just compare top level kernel times or remove the comparison calculation. 
+   Or we could keep the comparison as a theoretical upper bound on speedup.
+   poly_mul is the cosim measurement; the per-module figures are csynth
+   estimates, which have run 2-3% optimistic. */
+constexpr double KERNEL_MHZ         = 200.0;
+constexpr int    HW_CYCLES_NTT      = 273;
+constexpr int    HW_CYCLES_INVNTT   = 294;
+constexpr int    HW_CYCLES_BASEMUL  =  42;
+constexpr int    HW_CYCLES_POLY_MUL = 906;   // cosim, whole kernel
+constexpr int    HW_CYCLES_INTERVAL = 218;   // steady-state, back-to-back
+
+static constexpr double hw_ns(int cycles) { return cycles * 1000.0 / KERNEL_MHZ; }
+
 /* helpers */
 
 static int16_t center_mod_q(int64_t x) {
@@ -69,7 +83,7 @@ static void sw_poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[25
 }
 
 /* textbook_version: negacyclic convolution. acts as both the correctness reference and a
-   motivation for "why bother with an NTT". */
+   motivation for doing NTT. */
 static void textbook_version(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
   int64_t acc[512] = {0};
   for (int i = 0; i < 256; i++)
@@ -117,22 +131,48 @@ int main() {
   }
   std::printf("baseline verified against textbook_version product\n\n");
 
-  auto ntt_call = [&] { sw_poly_mul(a, b, r); sink += r[0]; };
-  auto sb_call  = [&] { textbook_version(a, b, r);  sink += r[0]; };
+  /* per-component inputs. ntt/invntt are in-place, so each timed call refreshes
+     its working array from a fresh copy. memcpy was timed and found to be negligible, 
+     and it keeps coefficients in range rather than letting repeated transforms grow them until int16_t overflows. 
+   */
+  static int16_t na[256], nb[256], prod[256], w[256];
+  std::memcpy(na, a, sizeof na); ntt(na);
+  std::memcpy(nb, b, sizeof nb); ntt(nb);
+  ref_basemul_all(prod, na, nb);          // NTT-domain product: the invntt input
 
-  for (int i = 0; i < ITERS; i++) ntt_call();          // warm up
+  auto f_poly_mul = [&] { sw_poly_mul(a, b, r);                sink += r[0]; };
+  auto f_ntt      = [&] { std::memcpy(w, a, sizeof w);    ntt(w);    sink += w[0]; };
+  auto f_invntt   = [&] { std::memcpy(w, prod, sizeof w); invntt(w); sink += w[0]; };
+  auto f_basemul  = [&] { ref_basemul_all(r, na, nb);           sink += r[0]; };
+  auto f_textbook = [&] { textbook_version(a, b, r);            sink += r[0]; };
 
-  auto t = time_batches(ntt_call, ITERS);
-  std::printf("NTT poly_mul   median %8.0f ns   (min %.0f, max %.0f, n=%d x %d)\n",
-              t[RUNS/2], t[0], t[RUNS-1], RUNS, ITERS);
+  for (int i = 0; i < ITERS; i++) f_poly_mul();        // warm up
+
+  //all measurements are being timed in one run of the same binary, so the values are comparable with each other. 
+  auto row = [&](const char *label, std::array<double, RUNS> t, double hw) {
+    double sw = t[RUNS/2];
+    std::printf("  %-18s %8.0f  %7.0f  %7.0f", label, sw, t[0], t[RUNS-1]);
+    if (hw > 0.0) std::printf("  %9.0f  %6.2fx", hw, sw / hw);
+    std::printf("\n");
+  };
+
+  std::printf("  %-18s %8s  %7s  %7s  %9s  %6s\n",
+              "", "median", "min", "max", "kernel", "ratio");
+  std::printf("  %-18s %8s  %7s  %7s  %9s  %6s\n",
+              "", "(ns)", "(ns)", "(ns)", "(ns)", "");
+
+  row("ntt",      time_batches(f_ntt,     ITERS), hw_ns(HW_CYCLES_NTT));
+  row("invntt",   time_batches(f_invntt,  ITERS), hw_ns(HW_CYCLES_INVNTT));
+  row("basemul",  time_batches(f_basemul, ITERS), hw_ns(HW_CYCLES_BASEMUL));
+  row("poly_mul", time_batches(f_poly_mul,ITERS), hw_ns(HW_CYCLES_POLY_MUL));
 
   const int sb_iters = std::max(ITERS / 50, 1);        // textbook_version is far slower
-  t = time_batches(sb_call, sb_iters);
-  std::printf("textbook_version     median %8.0f ns   (min %.0f, max %.0f, n=%d x %d)\n",
-              t[RUNS/2], t[0], t[RUNS-1], RUNS, sb_iters);
+  row("textbook", time_batches(f_textbook, sb_iters), 0.0);
 
-  std::printf("\nkernel for comparison: 906 cycles = 4530 ns at 200 MHz (compute only,\n"
-              "excludes dispatch and data transfer); steady-state 218 cycles = 1090 ns\n");
+  std::printf("\n  NOTE/TODO: kernel figures are COMPUTE ONLY AND FROM COSIM " 
+              "  they exclude dispatch and data transfer, so these ratios are an upper bound on end-to-end speedup.\n"
+              "  steady-state kernel throughput is %.0f ns per multiply (interval %d).\n",
+              hw_ns(HW_CYCLES_INTERVAL), HW_CYCLES_INTERVAL);
 
   (void)sink; // tell the compiler not to optimise away the work just because we don't use the result.
   return 0;
