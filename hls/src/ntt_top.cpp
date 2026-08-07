@@ -326,12 +326,14 @@
   *              - int16_t r[256]: output polynomial
   **************************************************/
   void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
-    // TODO: add these when this becomes standalone kernel. Separate bundles so the
-    // two operand reads can issue concurrently..
+    // vitis  infers m_axi for a/b/r, but puts all three
+    // on one shared gmem bundle. it serialises the two input
+    // copies (107+107 = ~217 cycles) and is what sets the top-level interval of
+    // 218 while every compute block runs at interval 32.
+    // TODO: split the bundles so the operand reads can overlap.
     // #pragma HLS INTERFACE mode=m_axi port=a bundle=gmem0 depth=256
     // #pragma HLS INTERFACE mode=m_axi port=b bundle=gmem1 depth=256
     // #pragma HLS INTERFACE mode=m_axi port=r bundle=gmem2 depth=256
-    // #pragma HLS INTERFACE mode=s_axilite port=return
     #pragma HLS DATAFLOW
 
     int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
