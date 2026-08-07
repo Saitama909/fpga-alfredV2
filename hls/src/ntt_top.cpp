@@ -75,38 +75,6 @@
     -105,  -1550,   -871,   1251,   -843,   -555,   -430,   1103,
   };
 
-  void hls_test_poly_mul(int16_t a[256], int16_t b[256], int16_t result[256]) {
-    #pragma HLS INTERFACE mode=m_axi port=a      bundle=gmem0 depth=256
-    #pragma HLS INTERFACE mode=m_axi port=b      bundle=gmem1 depth=256
-    #pragma HLS INTERFACE mode=m_axi port=result bundle=gmem2 depth=256
-    #pragma HLS INTERFACE mode=s_axilite port=return
-
-        int16_t ah[256], bh[256], rh[256];
-    #pragma HLS ARRAY_PARTITION variable=ah cyclic factor=8
-    #pragma HLS ARRAY_PARTITION variable=bh cyclic factor=8
-    #pragma HLS ARRAY_PARTITION variable=rh cyclic factor=8
-
-    COPY_AB:
-        for (int i = 0; i < 256; i++) {
-    #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=4
-            ah[i] = a[i];
-            bh[i] = b[i];
-        }
-        #pragma HLS DATAFLOW
-        ntt(ah);
-        ntt(bh);
-        hls_poly_basemul(rh, ah, bh);
-        invntt(rh);
-
-    COPY_R:
-        for (int i = 0; i < 256; i++) {
-    #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=4
-            result[i] = rh[i];
-        }
-    }
-  
   /*************************************************
   * Name:        fqmul
   *
@@ -358,6 +326,12 @@
   *              - int16_t r[256]: output polynomial
   **************************************************/
   void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
+    // TODO: add these when this becomes standalone kernel. Separate bundles so the
+    // two operand reads can issue concurrently..
+    // #pragma HLS INTERFACE mode=m_axi port=a bundle=gmem0 depth=256
+    // #pragma HLS INTERFACE mode=m_axi port=b bundle=gmem1 depth=256
+    // #pragma HLS INTERFACE mode=m_axi port=r bundle=gmem2 depth=256
+    // #pragma HLS INTERFACE mode=s_axilite port=return
     #pragma HLS DATAFLOW
 
     int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
