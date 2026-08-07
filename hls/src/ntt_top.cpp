@@ -10,12 +10,10 @@
   Makes it easier to tune. -Riley
 */
 
-// COEFF_INPUT_WIDTH: Number of coeffs copied in/out of local bufs per cycle.
-//    reqs: must divide 256. e.g 8, 16, 32, 64, 256
-//    def: Higher = fewer cycles, wider memory ports at the cost of more LUTs.
-//    notes: Setting this to 1 is basically the old baseline copy style.
-//           256 has been the best.
-static const int COEFF_INPUT_WIDTH = 256;
+// AXI gmem is 512 bit. 32 * int16 per beat. 
+// Copying in beats keeps HLS on a real burst instead of a fat 256 wide gather as it was before.
+static const int AXI_BEAT_COEFFS = 32; // 512 / 16
+static const int AXI_NUM_BEATS = 256 / AXI_BEAT_COEFFS;
 
 // BUTTERFLY_PAR: How many of the 128 butterflies run in parallel per stage.
 //    reqs: must divide 128. e.g. 4, 8, 16, 32, 64
@@ -111,23 +109,33 @@ static int16_t fqmul(int16_t a, int16_t b) {
   return montgomery_reduce((int32_t)a * b);
 }
 
+// Burst-load the polynomial from m_axi into a local buffer.
+// Then reads r as 512 bit beats (each 32 coeffs), 8 beats total.
+// So HLS issues one wide AXI burst instead of many narrow coeff reads. Unpacks each beat into dst[].
 static void copy_coeffs_in(const int16_t src[256], int16_t dst[256]) {
-  copy_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
+  const ap_uint<512> *wide = reinterpret_cast<const ap_uint<512> *>(src);
+  copy_r: for (int i = 0; i < AXI_NUM_BEATS; i++) {
     #pragma HLS PIPELINE II=1
-    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
+    ap_uint<512> beat = wide[i];
+    for (int t = 0; t < AXI_BEAT_COEFFS; t++) {
       #pragma HLS UNROLL
-      dst[i + t] = src[i + t];
+      dst[i * AXI_BEAT_COEFFS + t] = (int16_t)beat.range(16 * (t + 1) - 1, 16 * t);
     }
   }
 }
 
+// Burst-store the local result buffer back to m_axi.
+// Packs 32 coeffs per 512 bit beat and writes 8 sequential beats (one burst).
 static void copy_coeffs_out(const int16_t src[256], int16_t dst[256]) {
-  copy_out_r: for (int i = 0; i < 256; i += COEFF_INPUT_WIDTH) {
+  ap_uint<512> *wide = reinterpret_cast<ap_uint<512> *>(dst);
+  copy_out_r: for (int i = 0; i < AXI_NUM_BEATS; i++) {
     #pragma HLS PIPELINE II=1
-    for (int t = 0; t < COEFF_INPUT_WIDTH; t++) {
+    ap_uint<512> beat = 0;
+    for (int t = 0; t < AXI_BEAT_COEFFS; t++) {
       #pragma HLS UNROLL
-      dst[i + t] = src[i + t];
+      beat.range(16 * (t + 1) - 1, 16 * t) = (ap_uint<16>)src[i * AXI_BEAT_COEFFS + t];
     }
+    wide[i] = beat;
   }
 }
 
@@ -188,6 +196,12 @@ static void ntt_dataflow(const int16_t local_in[256], int16_t local_out[256]) {
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
 void ntt(int16_t r[256]) {
+  // Found info on how to configure this on the AMD UG1399 Vitis HLS guide. Link is in the doc.
+  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem depth=256 \
+      max_read_burst_length=256 max_write_burst_length=256 \
+      num_read_outstanding=16 num_write_outstanding=16 \
+      latency=8
+
   int16_t local_in[256];
   int16_t local_out[256];
   #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
@@ -256,6 +270,11 @@ static void invntt_dataflow(const int16_t local_in[256], int16_t local_out[256])
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
 void invntt(int16_t r[256]) {
+  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem depth=256 \
+      max_read_burst_length=256 max_write_burst_length=256 \
+      num_read_outstanding=16 num_write_outstanding=16 \
+      latency=8
+
   int16_t local_in[256];
   int16_t local_out[256];
   #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
