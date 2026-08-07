@@ -19,15 +19,16 @@ int main() {
   srand(42);
 
   int16_t orig[256];
-  int16_t work[256];
+  int16_t fwd[256];   // NTT domain
+  int16_t work[256];  // back in the normal domain
 
   for (int i = 0; i < 256; i++) {
     orig[i] = i-128;  // center_mod_q(rand() % KYBER_Q);
-    work[i] = orig[i];
   }
 
-  ntt(work);
-  invntt(work);
+  // out-of-place, so orig unmodified and can be compared against
+  ntt(orig, fwd);
+  invntt(fwd, work);
 
   // invntt(ntt(r)) == r * MONT (mod q), per the ntt_top.cpp doc comment:
   // invntt performs the inverse transform AND multiplies by the
