@@ -70,7 +70,7 @@ mv bench_poly_mul bench_poly_mul_aarch64_tuned_a53
 file bench_poly_mul_aarch64 bench_poly_mul_aarch64_tuned_a53      # expect "ARM aarch64 ... statically linked"
 
 # copy over all benchmarking files
-scp -r ./bench/ petalinux@10.42.0.168:~/bench/
+scp -r /path/to/bench/ petalinux@10.42.0.168:~/bench/
 ```
 
 ## On the board
