@@ -271,8 +271,8 @@
       #pragma HLS PIPELINE II=1
       #pragma HLS UNROLL factor=2
       int16_t z = (int16_t)zetas[64+i];
-      basemul(&r[4*i],   &a[4*i],   &b[4*i],    z);
-      basemul(&r[4*i+2], &a[4*i+2], &b[4*i+2], -z);
+      basemul(a[4*i],   a[4*i+1], b[4*i],   b[4*i+1],  z, r[4*i],   r[4*i+1]);
+      basemul(a[4*i+2], a[4*i+3], b[4*i+2], b[4*i+3], -z, r[4*i+2], r[4*i+3]);
     }
   }
   
