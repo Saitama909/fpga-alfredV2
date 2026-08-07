@@ -22,6 +22,72 @@ gcc -E . hls/src/ntt_top.cpp
 3. Run simulaiton. Verify that it passes.
 4. Run synthesis
 
+# Software Benchmarking
+
+`bench/` times the reference polynomial multiply so the kernel has something to
+be compared against. It links the **unmodified** pq-crystals `ntt.c` + `reduce.c`
+(built as C) not our HLS source and verifies its output against a textbook negacyclic product before timing anything.
+
+Get the reference source once:
+
+```sh
+git clone https://github.com/pq-crystals/kyber
+```
+
+## x86 smoke test
+
+Confirms the harness builds and is correct.
+
+```sh
+cd bench
+make KYBER=/path/to/kyber/ref
+mv bench_poly_mul bench_poly_mul_x86
+./bench_poly_mul
+```
+
+## Cross-compile for the A53
+
+Vitis ships a toolchain, so no need to install anything. `-static` should avoid any glibc mismatch with the board image.
+
+```sh
+export PATH=/tools/Xilinx/2025.2/Vitis/gnu/aarch64/lin/aarch64-linux/bin:$PATH
+
+cd bench && make clean
+make KYBER=/path/to/kyber/ref \
+     CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+     LDFLAGS=-static
+mv bench_poly_mul bench_poly_mul_aarch64
+
+# optional: -mcpu tuned build
+make clean
+make KYBER=/path/to/kyber/ref \
+     CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
+     CFLAGS="-O3 -fomit-frame-pointer -Wall -Wextra -mcpu=cortex-a53" \
+     CXXFLAGS="-O3 -fomit-frame-pointer -Wall -Wextra -mcpu=cortex-a53" \
+     LDFLAGS=-static
+mv bench_poly_mul bench_poly_mul_aarch64_tuned_a53
+
+file bench_poly_mul_aarch64 bench_poly_mul_aarch64_tuned_a53      # expect "ARM aarch64 ... statically linked"
+
+# copy over all benchmarking files
+scp -r /path/to/bench/ petalinux@10.42.0.168:~/bench/
+```
+
+## On the board
+
+```sh
+# record the environment so that we have some context to interpret the results
+uname -srm; head -2 /etc/os-release; lscpu | grep -Ei "model|mhz"; nproc
+
+# make sure to pin the clock to max frequency before running
+taskset -c 0 ./bench_poly_mul_aarch64
+taskset -c 0 ./bench_poly_mul_aarch64_tuned_a53
+```
+
+Notes:
+
+- Pinned to **one core**; the reference is single-threaded and the board has 4.
+- The `HW_CYCLES_*` constants at the top of `bench_poly_mul.cpp` are transcribed from the synthesis/cosim reports by hand **update them when the design changes**.
 
 
 # Notes on optimisation
