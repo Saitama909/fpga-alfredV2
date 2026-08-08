@@ -96,8 +96,8 @@
     #pragma HLS INLINE off
     for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
-      // builds 4 butterflies working in parallel
-      #pragma HLS UNROLL factor=4 
+      // builds 8 butterflies working in parallel
+      #pragma HLS UNROLL factor=8
       // loop flatten
       int g     = i / LEN;
       int off   = i % LEN;
@@ -133,12 +133,12 @@
     int16_t buf1[256], buf2[256], buf3[256];
     int16_t buf4[256], buf5[256], buf6[256];
     
-    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=16 dim=1
     // dataflow style
     ntt_stage<128>(in,   buf1);
     ntt_stage<64> (buf1, buf2);
@@ -155,7 +155,7 @@
     const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
     for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
-      #pragma HLS UNROLL factor=4
+      #pragma HLS UNROLL factor=8
       int g     = i / LEN;
       int off   = i % LEN;
       int start = g * (LEN << 1);
@@ -190,12 +190,12 @@
 
     int16_t buf1[256], buf2[256], buf3[256];
     int16_t buf4[256], buf5[256], buf6[256];
-    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=16 dim=1
 
     invntt_stage<2,   false>(in,   buf1);
     invntt_stage<4,   false>(buf1, buf2);
@@ -234,10 +234,10 @@
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     #pragma HLS INLINE off
     for (int i = 0; i < 64; i++) {
-      // unroll 2 touches indices 8i..8i+7 per cycle: one element per bank, given
-      // the caller's buffers are cyclic-8 partitioned
+      // unroll 4 touches indices 16i..16i+15 per cycle: one element per bank, given
+      // the caller's buffers are cyclic-16 partitioned
       #pragma HLS PIPELINE II=1
-      #pragma HLS UNROLL factor=2
+      #pragma HLS UNROLL factor=4
       int16_t z = (int16_t)zetas[64+i];
       basemul(a[4*i],   a[4*i+1], b[4*i],   b[4*i+1],  z, r[4*i],   r[4*i+1]);
       basemul(a[4*i+2], a[4*i+3], b[4*i+2], b[4*i+3], -z, r[4*i+2], r[4*i+3]);
@@ -302,9 +302,9 @@
   static void copy_poly(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
     for (int i = 0; i < 256; i++) {
-      // 8 coefficients per cycle: needs the caller's buffers cyclic-8 partitioned
+      // 16 coefficients per cycle: needs the caller's buffers cyclic-16 partitioned
       #pragma HLS PIPELINE II=1
-      #pragma HLS UNROLL factor=8
+      #pragma HLS UNROLL factor=16
       out[i] = in[i];
     }
   }
@@ -337,12 +337,12 @@
     #pragma HLS DATAFLOW
 
     int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
-    #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=na cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=8 dim=1
+    #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=na cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=16 dim=1
+    #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=16 dim=1
 
     copy_poly(a, ta);
     copy_poly(b, tb);
