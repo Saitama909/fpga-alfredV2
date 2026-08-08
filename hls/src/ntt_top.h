@@ -38,5 +38,15 @@ void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]);
    multiply, inverse NTT. */
 #define poly_mul KYBER_NAMESPACE(poly_mul)
 void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]);
+void hls_poly_ntt(const int16_t in[256], int16_t out[256]) ;
+
+void kyber_enc_core(const int16_t A_T[KYBER_K][KYBER_K][256],
+                    const int16_t t_hat[KYBER_K][256],
+                    const int16_t r[KYBER_K][256],
+                    const int16_t e1[KYBER_K][256],
+                    const int16_t e2[256],
+                    const int16_t msg[256],
+                    int16_t u[KYBER_K][256],
+                    int16_t v[256]);
 
 #endif /* NTT_TOP_H */

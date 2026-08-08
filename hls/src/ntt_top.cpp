@@ -246,11 +246,22 @@
   
 
   void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    for (int i = 0; i < 256; i++) r[i] = a[i] + b[i];
+    #pragma HLS INLINE off
+    for (int i = 0; i < 256; i++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=8
+      r[i] = a[i] + b[i];
+    }
+  
   }
 
   void hls_poly_reduce(int16_t r[256]) {
-    for (int i = 0; i < 256; i++) r[i] = barrett_reduce(r[i]);
+    #pragma HLS INLINE off
+    for (int i = 0; i < 256; i++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=8
+      r[i] = barrett_reduce(r[i]);
+    }
   }
 
   void hls_polyvec_basemul_acc(int16_t r[256],
@@ -357,3 +368,8 @@
 
     copy_poly(ti, r);
   }
+
+void hls_poly_ntt(const int16_t in[256], int16_t out[256]) {
+    ntt(in, out);
+    hls_poly_reduce(out);
+}
