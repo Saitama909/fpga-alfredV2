@@ -19,15 +19,15 @@ int main() {
   srand(42);
 
   int16_t orig[256];
+  int16_t mid[256];
   int16_t work[256];
 
   for (int i = 0; i < 256; i++) {
     orig[i] = i-128;  // center_mod_q(rand() % KYBER_Q);
-    work[i] = orig[i];
   }
 
-  ntt(work);
-  invntt(work);
+  ntt(orig, mid);
+  invntt(mid, work);
 
   // invntt(ntt(r)) == r * MONT (mod q), per the ntt_top.cpp doc comment:
   // invntt performs the inverse transform AND multiplies by the

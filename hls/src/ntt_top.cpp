@@ -4,25 +4,6 @@
 #include "reduction.h"
 #include "ap_int.h"
 
-///////// HLS LEVERS //////////////////////////////////////////////////////////
-/*
-  Thought it might be worth having these at the top for future twiddling.
-  Makes it easier to tune. -Riley
-*/
-
-// AXI gmem is 512 bit. 32 * int16 per beat. 
-// Copying in beats keeps HLS on a real burst instead of a fat 256 wide gather as it was before.
-static const int AXI_BEAT_COEFFS = 32; // 512 / 16
-static const int AXI_NUM_BEATS = 256 / AXI_BEAT_COEFFS;
-
-// BUTTERFLY_PAR: How many of the 128 butterflies run in parallel per stage.
-//    reqs: must divide 128. e.g. 4, 8, 16, 32, 64
-//    notes: 32 works best. 64 use heaps of DSPs. Only use if have plenty to spare.
-static const int BUTTERFLY_PAR = 32;
-static const int MEM_PAR = (BUTTERFLY_PAR * 2 > 256) ? 256 : (BUTTERFLY_PAR * 2);
-
-///////////////////////////////////////////////////////////////////////////////
-
 /* Code to generate zetas / zetas_inv (from the reference Kyber code):
 
 #define KYBER_ROOT_OF_UNITY 17
@@ -109,82 +90,28 @@ static int16_t fqmul(int16_t a, int16_t b) {
   return montgomery_reduce((int32_t)a * b);
 }
 
-// Burst-load the polynomial from m_axi into a local buffer.
-// Then reads r as 512 bit beats (each 32 coeffs), 8 beats total.
-// So HLS issues one wide AXI burst instead of many narrow coeff reads. Unpacks each beat into dst[].
-static void copy_coeffs_in(const int16_t src[256], int16_t dst[256]) {
-  const ap_uint<512> *wide = reinterpret_cast<const ap_uint<512> *>(src);
-  copy_r: for (int i = 0; i < AXI_NUM_BEATS; i++) {
-    #pragma HLS PIPELINE II=1
-    ap_uint<512> beat = wide[i];
-    for (int t = 0; t < AXI_BEAT_COEFFS; t++) {
-      #pragma HLS UNROLL
-      dst[i * AXI_BEAT_COEFFS + t] = (int16_t)beat.range(16 * (t + 1) - 1, 16 * t);
-    }
-  }
-}
-
-// Burst-store the local result buffer back to m_axi.
-// Packs 32 coeffs per 512 bit beat and writes 8 sequential beats (one burst).
-static void copy_coeffs_out(const int16_t src[256], int16_t dst[256]) {
-  ap_uint<512> *wide = reinterpret_cast<ap_uint<512> *>(dst);
-  copy_out_r: for (int i = 0; i < AXI_NUM_BEATS; i++) {
-    #pragma HLS PIPELINE II=1
-    ap_uint<512> beat = 0;
-    for (int t = 0; t < AXI_BEAT_COEFFS; t++) {
-      #pragma HLS UNROLL
-      beat.range(16 * (t + 1) - 1, 16 * t) = (ap_uint<16>)src[i * AXI_BEAT_COEFFS + t];
-    }
-    wide[i] = beat;
-  }
-}
-
 template <int LEN>
 static void ntt_stage(const int16_t in[256], int16_t out[256]) {
   #pragma HLS INLINE off
   for (int i = 0; i < 128; i++) {
     #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=BUTTERFLY_PAR
+    // builds 4 butterflies working in parallel
+    #pragma HLS UNROLL factor=4
+    // loop flatten
     int g     = i / LEN;
     int off   = i % LEN;
     int start = g * (LEN << 1);
     int j     = start + off;
     int16_t zeta = zetas[128 / LEN + g];
 
-    // Separate in/out avoids serialising the old inplace read/write pair
-    // (and the DEPENDENCE pragma that came with it).
+    // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses
+    // (and needed a DEPENDENCE pragma).
     int16_t a = in[j];
     int16_t b = in[j + LEN];
     int16_t t = fqmul(zeta, b);
     out[j]       = a + t;
     out[j + LEN] = a - t;
   }
-}
-
-// Ping-pong through private buffers. local_in / local_out stay distinct so
-// HLS doesn't collapse the DATAFLOW region on a read/write feedback of r.
-static void ntt_dataflow(const int16_t local_in[256], int16_t local_out[256]) {
-  #pragma HLS DATAFLOW
-
-  int16_t buf1[256], buf2[256], buf3[256];
-  int16_t buf4[256], buf5[256], buf6[256];
-
-  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
-
-  ntt_stage<128>(local_in, buf1);
-  ntt_stage<64> (buf1, buf2);
-  ntt_stage<32> (buf2, buf3);
-  ntt_stage<16> (buf3, buf4);
-  ntt_stage<8>  (buf4, buf5);
-  ntt_stage<4>  (buf5, buf6);
-  ntt_stage<2>  (buf6, local_out);
 }
 
 /*************************************************
@@ -195,30 +122,37 @@ static void ntt_dataflow(const int16_t local_in[256], int16_t local_out[256]) {
 *
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
-void ntt(int16_t r[256]) {
-  // Found info on how to configure this on the AMD UG1399 Vitis HLS guide. Link is in the doc.
-  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem depth=256 \
-      max_read_burst_length=256 max_write_burst_length=256 \
-      num_read_outstanding=16 num_write_outstanding=16 \
-      latency=8
+void ntt(const int16_t in[256], int16_t out[256]) {
+  // Keep as a sub-block so poly_mul can reuse it. inlining it would merge its DATAFLOW region into the caller.
+  #pragma HLS INLINE off
+  #pragma HLS DATAFLOW
 
-  int16_t local_in[256];
-  int16_t local_out[256];
-  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
+  int16_t buf1[256], buf2[256], buf3[256];
+  int16_t buf4[256], buf5[256], buf6[256];
 
-  copy_coeffs_in(r, local_in);
-  ntt_dataflow(local_in, local_out);
-  copy_coeffs_out(local_out, r);
+  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
+  // dataflow style
+  ntt_stage<128>(in,   buf1);
+  ntt_stage<64> (buf1, buf2);
+  ntt_stage<32> (buf2, buf3);
+  ntt_stage<16> (buf3, buf4);
+  ntt_stage<8>  (buf4, buf5);
+  ntt_stage<4>  (buf5, buf6);
+  ntt_stage<2>  (buf6, out);
 }
 
 template <int LEN, bool SCALE>
 static void invntt_stage(const int16_t in[256], int16_t out[256]) {
   #pragma HLS INLINE off
-  const int16_t f = 1441; /* mont^2 / 128 */
+  const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
   for (int i = 0; i < 128; i++) {
     #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=BUTTERFLY_PAR
+    #pragma HLS UNROLL factor=4
     int g     = i / LEN;
     int off   = i % LEN;
     int start = g * (LEN << 1);
@@ -228,6 +162,7 @@ static void invntt_stage(const int16_t in[256], int16_t out[256]) {
     int16_t b = in[j + LEN];
     int16_t s = barrett_reduce(t + b);
     int16_t d = fqmul(zeta, (int16_t)(t - b));
+    // inverse NTT needs a final multiply-by-1/128 on every coefficient
     if (SCALE) {
       s = fqmul(s, f);
       d = fqmul(d, f);
@@ -235,29 +170,6 @@ static void invntt_stage(const int16_t in[256], int16_t out[256]) {
     out[j]       = s;
     out[j + LEN] = d;
   }
-}
-
-static void invntt_dataflow(const int16_t local_in[256], int16_t local_out[256]) {
-  #pragma HLS DATAFLOW
-
-  int16_t buf1[256], buf2[256], buf3[256];
-  int16_t buf4[256], buf5[256], buf6[256];
-  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
-
-  invntt_stage<2,   false>(local_in, buf1);
-  invntt_stage<4,   false>(buf1, buf2);
-  invntt_stage<8,   false>(buf2, buf3);
-  invntt_stage<16,  false>(buf3, buf4);
-  invntt_stage<32,  false>(buf4, buf5);
-  invntt_stage<64,  false>(buf5, buf6);
-  invntt_stage<128, true> (buf6, local_out);
 }
 
 /*************************************************
@@ -269,20 +181,26 @@ static void invntt_dataflow(const int16_t local_in[256], int16_t local_out[256])
 *
 * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
 **************************************************/
-void invntt(int16_t r[256]) {
-  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem depth=256 \
-      max_read_burst_length=256 max_write_burst_length=256 \
-      num_read_outstanding=16 num_write_outstanding=16 \
-      latency=8
+void invntt(const int16_t in[256], int16_t out[256]) {
+  #pragma HLS INLINE off
+  #pragma HLS DATAFLOW
 
-  int16_t local_in[256];
-  int16_t local_out[256];
-  #pragma HLS ARRAY_PARTITION variable=local_in cyclic factor=MEM_PAR dim=1
-  #pragma HLS ARRAY_PARTITION variable=local_out cyclic factor=MEM_PAR dim=1
+  int16_t buf1[256], buf2[256], buf3[256];
+  int16_t buf4[256], buf5[256], buf6[256];
+  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
 
-  copy_coeffs_in(r, local_in);
-  invntt_dataflow(local_in, local_out);
-  copy_coeffs_out(local_out, r);
+  invntt_stage<2,   false>(in,   buf1);
+  invntt_stage<4,   false>(buf1, buf2);
+  invntt_stage<8,   false>(buf2, buf3);
+  invntt_stage<16,  false>(buf3, buf4);
+  invntt_stage<32,  false>(buf4, buf5);
+  invntt_stage<64,  false>(buf5, buf6);
+  invntt_stage<128, true> (buf6, out);    // applies the 1/128 scaling
 }
 
 /*************************************************
@@ -296,20 +214,29 @@ void invntt(int16_t r[256]) {
 *              - const int16_t b[2]: pointer to the second factor
 *              - int16_t zeta: integer defining the reduction polynomial
 **************************************************/
-void basemul(int16_t r[2], const int16_t a[2], const int16_t b[2], int16_t zeta) {
+void basemul(int16_t a0, int16_t a1,
+             int16_t b0, int16_t b1,
+             int16_t zeta,
+             int16_t &r0, int16_t &r1)
+{
   #pragma HLS INLINE
-  r[0]  = fqmul(a[1], b[1]);
-  r[0]  = fqmul(r[0], zeta);
-  r[0] += fqmul(a[0], b[0]);
-  r[1]  = fqmul(a[0], b[1]);
-  r[1] += fqmul(a[1], b[0]);
+  int16_t t = fqmul(a1, b1);
+  r0 = fqmul(t, zeta) + fqmul(a0, b0);
+  r1 = fqmul(a0, b1)  + fqmul(a1, b0);
 }
 
+// Pointwise multiply in the NTT domain; result carries a factor of R^-1.
+// INLINE off only so it shows as its own module in the synthesis report.
 void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
+  #pragma HLS INLINE off
   for (int i = 0; i < 64; i++) {
+    // unroll 2 touches indices 8i..8i+7 per cycle: one element per bank, given
+    // the caller's buffers are cyclic-8 partitioned
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=2
     int16_t z = (int16_t)zetas[64 + i];
-    basemul(&r[4 * i],     &a[4 * i],     &b[4 * i],      z);
-    basemul(&r[4 * i + 2], &a[4 * i + 2], &b[4 * i + 2], -z);
+    basemul(a[4 * i],     a[4 * i + 1], b[4 * i],     b[4 * i + 1],  z, r[4 * i],     r[4 * i + 1]);
+    basemul(a[4 * i + 2], a[4 * i + 3], b[4 * i + 2], b[4 * i + 3], -z, r[4 * i + 2], r[4 * i + 3]);
   }
 }
 
@@ -367,4 +294,63 @@ void hls_poly_tomont(int16_t r[256]) {
 void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
   for (int i = 0; i < 256; i++)
     r[i] = a[i] - b[i];
+}
+
+static void copy_poly(const int16_t in[256], int16_t out[256]) {
+  #pragma HLS INLINE off
+  for (int i = 0; i < 256; i++) {
+    // 8 coefficients per cycle: needs the caller's buffers cyclic-8 partitioned
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=8
+    out[i] = in[i];
+  }
+}
+
+/*************************************************
+* Name:        poly_mul
+*
+* Description: r = a * b in Rq = Zq[X]/(X^256+1), via the NTT. Forward
+*              transform both operands, multiply pointwise, transform back.
+*              basemul contributes R^-1 and invntt contributes R, so the
+*              Montgomery factors cancel and r is the plain product mod q
+*              (lazily reduced: congruent mod q, not necessarily centered).
+*
+*              Inputs are copied into local buffers so the caller's arrays
+*              survive, and so the interface arrays stay unpartitioned and
+*              this can become an m_axi kernel later.
+*
+* Arguments:   - const int16_t a[256], b[256]: input polynomials
+*              - int16_t r[256]: output polynomial
+**************************************************/
+void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
+  // vitis  infers m_axi for a/b/r, but puts all three
+  // on one shared gmem bundle. it serialises the two input
+  // copies (107+107 = ~217 cycles) and is what sets the top-level interval of
+  // 218 while every compute block runs at interval 32.
+  // TODO: split the bundles so the operand reads can overlap.
+  // #pragma HLS INTERFACE mode=m_axi port=a bundle=gmem0 depth=256
+  // #pragma HLS INTERFACE mode=m_axi port=b bundle=gmem1 depth=256
+  // #pragma HLS INTERFACE mode=m_axi port=r bundle=gmem2 depth=256
+  #pragma HLS DATAFLOW
+
+  int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
+  #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=na cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=8 dim=1
+
+  copy_poly(a, ta);
+  copy_poly(b, tb);
+
+  // separate processes under DATAFLOW, so these should run concurrently as two
+  // instances rather than sharing one
+  ntt(ta, na);
+  ntt(tb, nb);
+
+  hls_poly_basemul(tr, na, nb);
+  invntt(tr, ti);
+
+  copy_poly(ti, r);
 }
