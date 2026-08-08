@@ -94,25 +94,24 @@
   template <int LEN>
   static void ntt_stage(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
-    for (int ii = 0; ii < 128; ii += 4) {
+    for (int i = 0; i < 128; i++) {
       #pragma HLS PIPELINE II=1
-      for (int k = 0; k < 4; k++) {
-        #pragma HLS UNROLL
-        int i     = ii + k;
-        int g     = i / LEN;
-        int off   = i % LEN;
-        int start = g * (LEN << 1);
-        int j     = start + off;
-        int16_t zeta = zetas[128 / LEN + g];
+      // builds 4 butterflies working in parallel
+      #pragma HLS UNROLL factor=4 
+      // loop flatten
+      int g     = i / LEN;
+      int off   = i % LEN;
+      int start = g * (LEN << 1);
+      int j     = start + off;
+      int16_t zeta = zetas[128 / LEN + g];
 
-        // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses 
-        // (and needed a DEPENDENCE pragma).
-        int16_t a = in[j];
-        int16_t b = in[j + LEN];
-        int16_t t = fqmul(zeta, b);
-        out[j]       = a + t;
-        out[j + LEN] = a - t;
-      }
+      // original read and wrote the same array in each butterfly, which forces the hardware to serialise those accesses 
+      // (and needed a DEPENDENCE pragma).
+      int16_t a = in[j];
+      int16_t b = in[j + LEN];
+      int16_t t = fqmul(zeta, b);
+      out[j]       = a + t;
+      out[j + LEN] = a - t;
     }
   }
 
@@ -152,29 +151,27 @@
 
   template <int LEN, bool SCALE>
   static void invntt_stage(const int16_t in[256], int16_t out[256]) {
-  #pragma HLS INLINE off
-    const int16_t f = 1441;
-    for (int ii = 0; ii < 128; ii += 4) {
-    #pragma HLS PIPELINE II=1
-      for (int k = 0; k < 4; k++) {
-      #pragma HLS UNROLL
-        int i     = ii + k;
-        int g     = i / LEN;
-        int off   = i % LEN;
-        int start = g * (LEN << 1);
-        int j     = start + off;
-        int16_t zeta = zetas_inv[128 / LEN + g];
-        int16_t t = in[j];
-        int16_t b = in[j + LEN];
-        int16_t s = barrett_reduce(t + b);
-        int16_t d = fqmul(zeta, (int16_t)(t - b));
-        if (SCALE) {
-          s = fqmul(s, f);
-          d = fqmul(d, f);
-        }
-        out[j]       = s;
-        out[j + LEN] = d;
+    #pragma HLS INLINE off
+    const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
+    for (int i = 0; i < 128; i++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=4
+      int g     = i / LEN;
+      int off   = i % LEN;
+      int start = g * (LEN << 1);
+      int j     = start + off;
+      int16_t zeta = zetas_inv[128 / LEN + g];
+      int16_t t = in[j];
+      int16_t b = in[j + LEN];
+      int16_t s = barrett_reduce(t + b);
+      int16_t d = fqmul(zeta, (int16_t)(t - b));
+      // inverse NTT needs a final multiply-by-1/128 on every coefficient
+      if (SCALE) {                          
+        s = fqmul(s, f);
+        d = fqmul(d, f);
       }
+      out[j]       = s;
+      out[j + LEN] = d;
     }
   }
 
