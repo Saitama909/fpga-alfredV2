@@ -18,7 +18,16 @@ int16_t montgomery_reduce(int32_t a)
   #pragma HLS INLINE
   int16_t t;
 
-  t = (int16_t)a*QINV;
+  // t = (int16_t)a * QINV, where QINV = -3327 = -(2^11 + 2^10 + 2^8 - 1).
+  // Only the low 16 bits matter, so this is three 16-bit adds in fabric rather
+  // than a DSP. 
+  // had to writ this explicitly longhand because BIND_OP impl=fabric does not strength
+  // reduce a constant multiply for some reason, it just creates a generic array multiplier 
+  // (measured at 273 LUT each). The *KYBER_Q below and the zeta*b in fqmul stay on DSP.
+  // freeing one multiply per fqmul is what fits 32 lanes, freeing more overshoots LUT limit 
+  uint16_t x = (uint16_t)a;
+  t = (int16_t)(uint16_t)(x - (x << 11) - (x << 10) - (x << 8));
+
   t = (a - (int32_t)t*KYBER_Q) >> 16;
   return t;
 }
