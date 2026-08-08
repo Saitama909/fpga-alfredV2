@@ -1,6 +1,7 @@
 {
   "test_branches": [
     "local",
-    "main"
+    "main",
+    "adi/unroll-partitioning-optim"
     ]
 }

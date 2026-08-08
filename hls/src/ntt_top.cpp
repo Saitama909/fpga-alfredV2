@@ -4,6 +4,34 @@
 #include "reduction.h"
 #include "ap_int.h"
 
+///////// HLS LEVERS //////////////////////////////////////////////////////////
+/*
+  BUTTERFLY_PAR: partitions / basemul / AXI banks stay matched.
+  Must divide 128 (e.g. 4, 8, 16). 8 is the current best i can get without >100% usage 
+  -Riley
+*/
+static const int BUTTERFLY_PAR = 8;
+
+/* 
+  AXI OUTSTANDING: in-flight m_axi requests. basically a BRAM vs latency trade off.
+  Reads matter more for a/b and writes for r. 4 has been fine so far without any drop in latency.
+  -Riley
+*/
+static const int AXI_READ_OUTSTANDING = 4;
+static const int AXI_WRITE_OUTSTANDING = 4;
+///////////////////////////////////////////////////////////////////////////////
+
+
+///////// Unroll factors calculatins - DONT MODIFY! ///////////////////////////
+static const int MEM_PAR = BUTTERFLY_PAR * 2; // ports for j and j+LEN
+static const int BASEMUL_UNROLL = BUTTERFLY_PAR / 2;
+
+static const int AXI_BEAT_COEFFS = 32; // 512-bit gmem / 16-bit coeff
+static const int AXI_NUM_BEATS = 256 / AXI_BEAT_COEFFS;
+static const int AXI_BANKS = (MEM_PAR > AXI_BEAT_COEFFS) ? AXI_BEAT_COEFFS : MEM_PAR;
+///////////////////////////////////////////////////////////////////////////////
+
+
 /* Code to generate zetas / zetas_inv (from the reference Kyber code):
 
 #define KYBER_ROOT_OF_UNITY 17
@@ -95,8 +123,8 @@ static void ntt_stage(const int16_t in[256], int16_t out[256]) {
   #pragma HLS INLINE off
   for (int i = 0; i < 128; i++) {
     #pragma HLS PIPELINE II=1
-    // builds 4 butterflies working in parallel
-    #pragma HLS UNROLL factor=4
+    // builds BUTTERFLY_PAR butterflies working in parallel
+    #pragma HLS UNROLL factor=BUTTERFLY_PAR
     // loop flatten
     int g     = i / LEN;
     int off   = i % LEN;
@@ -130,12 +158,12 @@ void ntt(const int16_t in[256], int16_t out[256]) {
   int16_t buf1[256], buf2[256], buf3[256];
   int16_t buf4[256], buf5[256], buf6[256];
 
-  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
   // dataflow style
   ntt_stage<128>(in,   buf1);
   ntt_stage<64> (buf1, buf2);
@@ -152,7 +180,7 @@ static void invntt_stage(const int16_t in[256], int16_t out[256]) {
   const int16_t f = 1441;                 // mont^2 / 128  (512 for plain 1/128)
   for (int i = 0; i < 128; i++) {
     #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=4
+    #pragma HLS UNROLL factor=BUTTERFLY_PAR
     int g     = i / LEN;
     int off   = i % LEN;
     int start = g * (LEN << 1);
@@ -187,12 +215,12 @@ void invntt(const int16_t in[256], int16_t out[256]) {
 
   int16_t buf1[256], buf2[256], buf3[256];
   int16_t buf4[256], buf5[256], buf6[256];
-  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf1 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf2 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf3 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
 
   invntt_stage<2,   false>(in,   buf1);
   invntt_stage<4,   false>(buf1, buf2);
@@ -230,10 +258,9 @@ void basemul(int16_t a0, int16_t a1,
 void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
   #pragma HLS INLINE off
   for (int i = 0; i < 64; i++) {
-    // unroll 2 touches indices 8i..8i+7 per cycle: one element per bank, given
-    // the caller's buffers are cyclic-8 partitioned
+    // BASEMUL_UNROLL keeps basemul II in step with the NTT stages
     #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=2
+    #pragma HLS UNROLL factor=BASEMUL_UNROLL
     int16_t z = (int16_t)zetas[64 + i];
     basemul(a[4 * i],     a[4 * i + 1], b[4 * i],     b[4 * i + 1],  z, r[4 * i],     r[4 * i + 1]);
     basemul(a[4 * i + 2], a[4 * i + 3], b[4 * i + 2], b[4 * i + 3], -z, r[4 * i + 2], r[4 * i + 3]);
@@ -296,13 +323,55 @@ void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
     r[i] = a[i] - b[i];
 }
 
-static void copy_poly(const int16_t in[256], int16_t out[256]) {
+static void copy_axi_in(const int16_t src[256], int16_t dst[256]) {
   #pragma HLS INLINE off
-  for (int i = 0; i < 256; i++) {
-    // 8 coefficients per cycle: needs the caller's buffers cyclic-8 partitioned
-    #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=8
-    out[i] = in[i];
+  // AXI gmem is 512-bit: 32 int16s per beat, 8 beats for a poly.
+  // Unpack AXI_BANKS coeffs/cycle so we match the cyclic-MEM_PAR locals.
+  const ap_uint<512> *wide = reinterpret_cast<const ap_uint<512> *>(src);
+  
+  // copy in beats
+  for (int i = 0; i < AXI_NUM_BEATS; i++) {
+    ap_uint<512> beat = wide[i];
+    int16_t tmp[32];
+    #pragma HLS ARRAY_PARTITION variable=tmp complete dim=1
+    for (int t = 0; t < AXI_BEAT_COEFFS; t++) {
+      #pragma HLS UNROLL
+      tmp[t] = (int16_t)beat.range(16 * (t + 1) - 1, 16 * t);
+    }
+    // unpack coeffs into banks
+    for (int c = 0; c < AXI_BEAT_COEFFS / AXI_BANKS; c++) {
+      #pragma HLS PIPELINE II=1
+      for (int t = 0; t < AXI_BANKS; t++) {
+        #pragma HLS UNROLL
+        int lane = c * AXI_BANKS + t;
+        dst[i * AXI_BEAT_COEFFS + lane] = tmp[lane];
+      }
+    }
+  }
+}
+
+static void copy_axi_out(const int16_t src[256], int16_t dst[256]) {
+  #pragma HLS INLINE off
+  ap_uint<512> *wide = reinterpret_cast<ap_uint<512> *>(dst);
+  // copy out beats
+  for (int i = 0; i < AXI_NUM_BEATS; i++) {
+    int16_t tmp[32];
+    #pragma HLS ARRAY_PARTITION variable=tmp complete dim=1
+    // pack coeffs into banks
+    for (int c = 0; c < AXI_BEAT_COEFFS / AXI_BANKS; c++) {
+      #pragma HLS PIPELINE II=1
+      for (int t = 0; t < AXI_BANKS; t++) {
+        #pragma HLS UNROLL
+        int lane = c * AXI_BANKS + t;
+        tmp[lane] = src[i * AXI_BEAT_COEFFS + lane];
+      }
+    }
+    ap_uint<512> beat = 0;
+    for (int t = 0; t < AXI_BEAT_COEFFS; t++) {
+      #pragma HLS UNROLL
+      beat.range(16 * (t + 1) - 1, 16 * t) = (ap_uint<16>)tmp[t];
+    }
+    wide[i] = beat;
   }
 }
 
@@ -316,41 +385,52 @@ static void copy_poly(const int16_t in[256], int16_t out[256]) {
 *              (lazily reduced: congruent mod q, not necessarily centered).
 *
 *              Inputs are copied into local buffers so the caller's arrays
-*              survive, and so the interface arrays stay unpartitioned and
-*              this can become an m_axi kernel later.
+*              survive, and so the interface arrays stay unpartitioned.
 *
 * Arguments:   - const int16_t a[256], b[256]: input polynomials
 *              - int16_t r[256]: output polynomial
 **************************************************/
 void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
-  // vitis  infers m_axi for a/b/r, but puts all three
-  // on one shared gmem bundle. it serialises the two input
-  // copies (107+107 = ~217 cycles) and is what sets the top-level interval of
-  // 218 while every compute block runs at interval 32.
-  // TODO: split the bundles so the operand reads can overlap.
-  // #pragma HLS INTERFACE mode=m_axi port=a bundle=gmem0 depth=256
-  // #pragma HLS INTERFACE mode=m_axi port=b bundle=gmem1 depth=256
-  // #pragma HLS INTERFACE mode=m_axi port=r bundle=gmem2 depth=256
+  /*************************************************
+  Riley Notes:
+  - Separate bundles so the two operand reads can overlap under DATAFLOW instead of sharing one gmem and serialising (~217 cycles of copies).
+  - num_read/write_outstanding value can be twiddled to reduce BRAM usage. If it gets too low tho, can increase latency due to bus being congested. 4 seems to be working. 
+  *************************************************/
+  
+  #pragma HLS INTERFACE m_axi port=a offset=slave bundle=gmem0 depth=256 \
+      max_read_burst_length=256 max_write_burst_length=256 \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1 depth=256 \
+      max_read_burst_length=256 max_write_burst_length=256 \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem2 depth=256 \
+      max_read_burst_length=256 max_write_burst_length=256 \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
   #pragma HLS DATAFLOW
 
   int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
-  #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=na cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=8 dim=1
-  #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=8 dim=1
+  #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=na cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=MEM_PAR dim=1
+  #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=MEM_PAR dim=1
 
-  copy_poly(a, ta);
-  copy_poly(b, tb);
+  copy_axi_in(a, ta);
+  copy_axi_in(b, tb);
 
-  // separate processes under DATAFLOW, so these should run concurrently as two
-  // instances rather than sharing one
+  // separate processes under DATAFLOW, so these should run concurrently as two instances rather than sharing one
   ntt(ta, na);
   ntt(tb, nb);
 
   hls_poly_basemul(tr, na, nb);
   invntt(tr, ti);
 
-  copy_poly(ti, r);
+  copy_axi_out(ti, r);
 }

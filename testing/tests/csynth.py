@@ -46,6 +46,68 @@ def _section(text, start_re, stop_re):
     return text[m.start() : end]
 
 
+# _parse_module_intervals
+# Pull per-instance Interval (max) from Latency → Detail → Instance.
+# Also picks up Loop rows when that section is not N/A.
+def _parse_module_intervals(text):
+    out = []
+    seen = set()
+
+    def _add(label, ii_max):
+        if not label:
+            return
+        if label in seen:
+            n = 2
+            while f"{label}_{n}" in seen:
+                n += 1
+            label = f"{label}_{n}"
+        seen.add(label)
+        out.append((label, str(ii_max)))
+
+    detail = _section(text, r"^\+ Latency:\s*$", r"^={3,}\s*$")
+    if not detail:
+        detail = text
+
+    inst_blk = _section(detail, r"^\s*\* Instance:\s*$", r"^\s*\* Loop:\s*$")
+    row_re = re.compile(
+        r"\|\s*([A-Za-z0-9_]+)\s*"
+        r"\|\s*([A-Za-z0-9_]+)\s*"
+        r"\|\s*(\d+)\s*"
+        r"\|\s*(\d+)\s*"
+        r"\|\s*[^|]+\|"
+        r"\s*[^|]+\|"
+        r"\s*(\d+)\s*"
+        r"\|\s*(\d+)\s*\|"
+    )
+    for line in inst_blk.splitlines():
+        m = row_re.search(line)
+        if not m:
+            continue
+        inst, _mod, _lo, _hi, _ii_lo, ii_hi = m.groups()
+        if inst.lower() == "instance":
+            continue
+        label = inst[:-3] if inst.endswith("_U0") else inst
+        if label == "entry_proc" and ii_hi == "0":
+            continue
+        _add(label, ii_hi)
+
+    loop_blk = _section(detail, r"^\s*\* Loop:\s*$", r"^={3,}\s*$")
+    if loop_blk and not re.search(r"^\s*N/A\s*$", loop_blk, re.M):
+        for line in loop_blk.splitlines():
+            if "N/A" in line:
+                continue
+            name_m = re.match(r"\|\s*([A-Za-z0-9_:-]+)\s*\|", line)
+            nums = re.findall(r"\|\s*(\d+)\s*", line)
+            if not name_m or len(nums) < 2:
+                continue
+            name = name_m.group(1)
+            if name.lower() in ("loop", "name"):
+                continue
+            _add(f"loop:{name}", nums[-1])
+
+    return out
+
+
 # _parse
 # Parse the csynth report text and return a dictionary of the results.
 # ..TODO: Time permitting, make this and other file files pull the report out of xls instead of this.
@@ -74,6 +136,8 @@ def _parse(text):
         out["abs_max"] = row.group(4)
         out["ii_min"] = row.group(5)
         out["ii_max"] = row.group(6)
+
+    out["module_ii"] = _parse_module_intervals(text)
 
     util_block = _section(text, r"^== Utilization Estimates\s*$", r"^== [A-Za-z]")
     util = (
@@ -128,6 +192,12 @@ def _print_summary(m, warn, high, over):
         print(f"  latency: {m['lat_min']} .. {m['lat_max']} cycles")
     if "ii_max" in m:
         print(f"  interval: {m['ii_min']} .. {m['ii_max']} cycles")
+    modules = m.get("module_ii") or []
+    if modules:
+        print("  module intervals:")
+        width = max(len(name) for name, _ in modules)
+        for name, ii in modules:
+            print(f"    {name:<{width}}  {ii}")
     for name in ("BRAM", "DSP", "FF", "LUT", "URAM"):
         if name in m:
             t, a, p = m[name]
@@ -178,13 +248,17 @@ def run(ctx, results):
     results["clock_est"] = m.get("clock_est")
     results["abs_min"] = m.get("abs_min")
     results["abs_max"] = m.get("abs_max")
+    results["module_ii"] = m.get("module_ii") or []
     for name in ("BRAM", "DSP", "FF", "LUT", "URAM"):
         if name in m:
             results["res"][name] = m[name]
 
     lines = [f"csynth summary {now()}", ""]
     for k, v in m.items():
-        if k in ("BRAM", "DSP", "FF", "LUT", "URAM") and isinstance(v, (tuple, list)):
+        if k == "module_ii":
+            for name, ii in v or []:
+                lines.append(f"module_ii.{name}={ii}")
+        elif k in ("BRAM", "DSP", "FF", "LUT", "URAM") and isinstance(v, (tuple, list)):
             used, avail, pct = v
             lines.append(f"{k}={used}/{avail} ({pct}%)")
         else:

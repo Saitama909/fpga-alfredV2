@@ -570,6 +570,7 @@ def parse_run_summary(path: Path) -> dict:
     data = {
         "steps": {},
         "timing": {},
+        "module_ii": {},
         "usage": {},
     }
     section = None
@@ -581,6 +582,9 @@ def parse_run_summary(path: Path) -> dict:
             continue
         if s == "Timing":
             section = "timing"
+            continue
+        if s == "Module intervals":
+            section = "module_ii"
             continue
         if s == "Usage":
             section = "usage"
@@ -608,6 +612,13 @@ def parse_run_summary(path: Path) -> dict:
                 data["timing"]["cosim_lat"] = s.split(":", 1)[-1].strip()
             elif "cosim interval" in s:
                 data["timing"]["cosim_ii"] = s.split(":", 1)[-1].strip()
+        elif section == "module_ii":
+            # "name  48" or "name: 48"
+            m = re.match(r"^(\S+)\s+(\d+)\s*$", s)
+            if not m:
+                m = re.match(r"^(\S+):\s*(\d+)\s*$", s)
+            if m:
+                data["module_ii"][m.group(1)] = m.group(2)
         elif section == "usage":
             if s.lower().startswith("resource"):
                 continue
@@ -633,19 +644,34 @@ def _parse_lat_num(val: str) -> float | None:
 
 
 # Prefer lat_max / ii_max from outputs/cosim-summary.txt when present.
+# Also fill module_ii from csynth-summary.txt if run-summary lacked them.
 def _enrich_cosim_from_summary(branch_dir: Path, data: dict) -> None:
     path = branch_dir / "outputs" / "cosim-summary.txt"
-    if not path.is_file():
-        return
-    for line in path.read_text(errors="replace").splitlines():
-        if line.startswith("lat_max="):
-            val = line.split("=", 1)[1].strip()
-            if val and val.lower() != "unknown":
-                data["timing"]["cosim_lat"] = val
-        elif line.startswith("ii_max="):
-            val = line.split("=", 1)[1].strip()
-            if val and val.lower() != "unknown":
-                data["timing"]["cosim_ii"] = val
+    if path.is_file():
+        for line in path.read_text(errors="replace").splitlines():
+            if line.startswith("lat_max="):
+                val = line.split("=", 1)[1].strip()
+                if val and val.lower() != "unknown":
+                    data["timing"]["cosim_lat"] = val
+            elif line.startswith("ii_max="):
+                val = line.split("=", 1)[1].strip()
+                if val and val.lower() != "unknown":
+                    data["timing"]["cosim_ii"] = val
+
+    csynth_path = branch_dir / "outputs" / "csynth-summary.txt"
+    if csynth_path.is_file() and not data.get("module_ii"):
+        mods = {}
+        for line in csynth_path.read_text(errors="replace").splitlines():
+            if line.startswith("module_ii."):
+                rest = line[len("module_ii.") :]
+                if "=" not in rest:
+                    continue
+                name, _, val = rest.partition("=")
+                name, val = name.strip(), val.strip()
+                if name and val:
+                    mods[name] = val
+        if mods:
+            data["module_ii"] = mods
 
 
 # Map relative path → md5 for files under branches/<name>/hls/src.
@@ -774,16 +800,14 @@ def mode_compare(show_all: bool = False) -> int:
         ("clock_target", "clock target"),
         ("clock_est", "clock est"),
         ("csynth_lat", "csynth lat"),
-        ("csynth_ii", "csynth ii"),
         ("cosim_lat", "cosim lat"),
-        ("cosim_ii", "cosim ii"),
     ]
     emit(f"  {'metric':<16}" + "".join(f" {h:>{width}}" for h in headers))
     for key, label in timing_keys:
         raw = {n: data["timing"].get(key, "-") for n, data in rows}
         nums = (
             {n: _parse_lat_num(v) for n, v in raw.items()}
-            if key.endswith("lat") or key.endswith("ii")
+            if key.endswith("lat")
             else {}
         )
         coloured = []
@@ -791,7 +815,7 @@ def mode_compare(show_all: bool = False) -> int:
         for n, _ in rows:
             cell = f"{raw[n]:>{width}}"
             plain_cells.append(cell)
-            if (key.endswith("lat") or key.endswith("ii")) and len(rows) > 1:
+            if key.endswith("lat") and len(rows) > 1:
                 coloured.append(_colour_extremes(nums, cell, n))
             else:
                 coloured.append(cell)
@@ -825,6 +849,38 @@ def mode_compare(show_all: bool = False) -> int:
     plain_lines.append(
         f"  {'Δ cosim-csynth':<16}" + "".join(f" {c}" for c in plain_cells)
     )
+    emit("")
+
+    ##### Module intervals (per DATAFLOW instance)
+    emit("Module intervals (csynth ii)")
+    mod_keys = []
+    for _, data in rows:
+        for k in data.get("module_ii") or {}:
+            if k not in mod_keys:
+                mod_keys.append(k)
+    if not mod_keys:
+        emit("  (none)")
+    else:
+        label_w = max(16, max(len(k) for k in mod_keys))
+        emit(f"  {'module':<{label_w}}" + "".join(f" {h:>{width}}" for h in headers))
+        for mod in mod_keys:
+            raw = {
+                n: (data.get("module_ii") or {}).get(mod, "-") for n, data in rows
+            }
+            nums = {n: _parse_lat_num(v) for n, v in raw.items()}
+            coloured = []
+            plain_cells = []
+            for n, _ in rows:
+                cell = f"{raw[n]:>{width}}"
+                plain_cells.append(cell)
+                if len(rows) > 1:
+                    coloured.append(_colour_extremes(nums, cell, n))
+                else:
+                    coloured.append(cell)
+            print(f"  {mod:<{label_w}}" + "".join(f" {c}" for c in coloured))
+            plain_lines.append(
+                f"  {mod:<{label_w}}" + "".join(f" {c}" for c in plain_cells)
+            )
     emit("")
 
     ##### Usage table

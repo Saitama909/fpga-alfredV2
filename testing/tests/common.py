@@ -176,11 +176,8 @@ def print_run_summary(step_status, results, warn, high, over):
         for k in (
             "clock_target",
             "lat_max",
-            "ii_max",
             "cosim_lat_max",
             "cosim_lat",
-            "cosim_ii",
-            "cosim_ii_max",
         )
     )
 
@@ -194,23 +191,28 @@ def print_run_summary(step_status, results, warn, high, over):
         clk_e = results.get("clock_est") or "-"
         lat_lo = results.get("lat_min") or "-"
         lat_hi = results.get("lat_max") or "-"
-        ii_lo = results.get("ii_min") or "-"
-        ii_hi = results.get("ii_max") or "-"
         cosim = results.get("cosim_lat_max") or results.get("cosim_lat") or "-"
-        cosim_ii = (
-            results.get("cosim_ii_max")
-            or results.get("cosim_ii")
-            or "-"
-        )
         rows = [
             f"  {'clock target (ns): '} {((str(clk_t)) if clk_t != '-' else '-')}",
             f"  {'clock est. (ns): '} {((str(clk_e)) if clk_e != '-' else '-')}",
             f"  {'csynth lat. (cycles): '} {(f'{lat_lo} to {lat_hi}' if lat_hi != '-' else '-')}",
-            f"  {'csynth interval (cycles): '} {(f'{ii_lo} to {ii_hi}' if ii_hi != '-' else '-')}",
             f"  {'cosim lat (cycles): '} {(str(cosim) if cosim == '-' else str(cosim))}",
-            f"  {'cosim interval (cycles): '} {(str(cosim_ii) if cosim_ii == '-' else str(cosim_ii))}",
         ]
         for line in rows:
+            print(line)
+            plain.append(line)
+
+    # --- Module intervals (per DATAFLOW instance from csynth) ---
+    modules = results.get("module_ii") or []
+    if modules:
+        print("")
+        print("Module intervals")
+        plain.append("")
+        plain.append("Module intervals")
+        width = max(len(name) for name, _ in modules)
+        width = max(width, 8)
+        for name, ii in modules:
+            line = f"  {name:<{width}}  {ii}"
             print(line)
             plain.append(line)
 
