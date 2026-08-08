@@ -67,7 +67,7 @@ See the output/comparing of multiple branches at once.
 
 **File matches**: rows are files under each branch’s `hls/src`. Cells show an 8-char content hash (`-` if missing). Identical hashes share a colour and unique hashes stay uncoloured. Basically just trying to show which files are the same between branches.
 
-With 2+ branches, best (lowest latency / util) is green and worst is red. Cosim latency is taken from `cosim-summary.txt` when present.
+With 2+ branches, best (lowest latency / interval / util) is green and worst is red. Cosim latency and interval are taken from `cosim-summary.txt` when present.
 
 Also writes a plain copy to `branch-tester/compare-summary.txt`.
 

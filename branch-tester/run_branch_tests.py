@@ -602,8 +602,12 @@ def parse_run_summary(path: Path) -> dict:
                 data["timing"]["clock_est"] = s.split(":", 1)[-1].strip()
             elif "csynth lat" in s:
                 data["timing"]["csynth_lat"] = s.split(":", 1)[-1].strip()
+            elif "csynth interval" in s:
+                data["timing"]["csynth_ii"] = s.split(":", 1)[-1].strip()
             elif "cosim lat" in s:
                 data["timing"]["cosim_lat"] = s.split(":", 1)[-1].strip()
+            elif "cosim interval" in s:
+                data["timing"]["cosim_ii"] = s.split(":", 1)[-1].strip()
         elif section == "usage":
             if s.lower().startswith("resource"):
                 continue
@@ -628,7 +632,7 @@ def _parse_lat_num(val: str) -> float | None:
     return float(nums[-1])
 
 
-# Prefer lat_max from outputs/cosim-summary.txt when present.
+# Prefer lat_max / ii_max from outputs/cosim-summary.txt when present.
 def _enrich_cosim_from_summary(branch_dir: Path, data: dict) -> None:
     path = branch_dir / "outputs" / "cosim-summary.txt"
     if not path.is_file():
@@ -638,7 +642,10 @@ def _enrich_cosim_from_summary(branch_dir: Path, data: dict) -> None:
             val = line.split("=", 1)[1].strip()
             if val and val.lower() != "unknown":
                 data["timing"]["cosim_lat"] = val
-            break
+        elif line.startswith("ii_max="):
+            val = line.split("=", 1)[1].strip()
+            if val and val.lower() != "unknown":
+                data["timing"]["cosim_ii"] = val
 
 
 # Map relative path → md5 for files under branches/<name>/hls/src.
@@ -767,14 +774,16 @@ def mode_compare(show_all: bool = False) -> int:
         ("clock_target", "clock target"),
         ("clock_est", "clock est"),
         ("csynth_lat", "csynth lat"),
+        ("csynth_ii", "csynth ii"),
         ("cosim_lat", "cosim lat"),
+        ("cosim_ii", "cosim ii"),
     ]
     emit(f"  {'metric':<16}" + "".join(f" {h:>{width}}" for h in headers))
     for key, label in timing_keys:
         raw = {n: data["timing"].get(key, "-") for n, data in rows}
         nums = (
             {n: _parse_lat_num(v) for n, v in raw.items()}
-            if key.endswith("lat")
+            if key.endswith("lat") or key.endswith("ii")
             else {}
         )
         coloured = []
@@ -782,7 +791,7 @@ def mode_compare(show_all: bool = False) -> int:
         for n, _ in rows:
             cell = f"{raw[n]:>{width}}"
             plain_cells.append(cell)
-            if key.endswith("lat") and len(rows) > 1:
+            if (key.endswith("lat") or key.endswith("ii")) and len(rows) > 1:
                 coloured.append(_colour_extremes(nums, cell, n))
             else:
                 coloured.append(cell)

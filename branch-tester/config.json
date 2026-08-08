@@ -1,8 +1,6 @@
 {
   "test_branches": [
     "local",
-    "batching",
-    "adi/software-polymul",
     "main"
     ]
 }

@@ -138,6 +138,9 @@ def run(ctx, results):
     results["cosim_lat_avg"] = info.get("lat_avg")
     results["cosim_lat_max"] = info.get("lat_max")
     results["cosim_ii"] = info.get("ii_max")
+    results["cosim_ii_min"] = info.get("ii_min")
+    results["cosim_ii_avg"] = info.get("ii_avg")
+    results["cosim_ii_max"] = info.get("ii_max")
 
     summary_lines = [
         f"cosim_pass={ok}",
@@ -145,6 +148,8 @@ def run(ctx, results):
         f"lat_min={info.get('lat_min', 'unknown')}",
         f"lat_avg={info.get('lat_avg', 'unknown')}",
         f"lat_max={info.get('lat_max', 'unknown')}",
+        f"ii_min={info.get('ii_min', 'unknown')}",
+        f"ii_avg={info.get('ii_avg', 'unknown')}",
         f"ii_max={info.get('ii_max', 'unknown')}",
         f"total_cycles={info.get('total_cycles', 'unknown')}",
         f"time={now()}",

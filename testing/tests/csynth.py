@@ -72,6 +72,8 @@ def _parse(text):
         out["lat_max"] = row.group(2)
         out["abs_min"] = row.group(3)
         out["abs_max"] = row.group(4)
+        out["ii_min"] = row.group(5)
+        out["ii_max"] = row.group(6)
 
     util_block = _section(text, r"^== Utilization Estimates\s*$", r"^== [A-Za-z]")
     util = (
@@ -124,6 +126,8 @@ def _print_summary(m, warn, high, over):
         print(f"  timing: {m['clock_target']} ns target, " f"{m['clock_est']} ns est")
     if "lat_max" in m:
         print(f"  latency: {m['lat_min']} .. {m['lat_max']} cycles")
+    if "ii_max" in m:
+        print(f"  interval: {m['ii_min']} .. {m['ii_max']} cycles")
     for name in ("BRAM", "DSP", "FF", "LUT", "URAM"):
         if name in m:
             t, a, p = m[name]
@@ -168,6 +172,8 @@ def run(ctx, results):
     m = _parse(rpt.read_text(errors="replace"))
     results["lat_min"] = m.get("lat_min")
     results["lat_max"] = m.get("lat_max")
+    results["ii_min"] = m.get("ii_min")
+    results["ii_max"] = m.get("ii_max")
     results["clock_target"] = m.get("clock_target")
     results["clock_est"] = m.get("clock_est")
     results["abs_min"] = m.get("abs_min")

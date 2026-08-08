@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-TEST_VERSION = "0.1"
+TEST_VERSION = "0.2 (Added interval stats)"
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
