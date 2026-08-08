@@ -232,7 +232,6 @@
   // Pointwise multiply in the NTT domain; result carries a factor of R^-1.
   // INLINE off only so it shows as its own module in the synthesis report.
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    #pragma HLS INLINE off
     for (int i = 0; i < 64; i++) {
       // unroll 2 touches indices 8i..8i+7 per cycle: one element per bank, given
       // the caller's buffers are cyclic-8 partitioned
@@ -246,7 +245,6 @@
   
 
   void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    #pragma HLS INLINE off
     for (int i = 0; i < 256; i++) {
       #pragma HLS PIPELINE II=1
       #pragma HLS UNROLL factor=8
@@ -256,7 +254,6 @@
   }
 
   void hls_poly_reduce(int16_t r[256]) {
-    #pragma HLS INLINE off
     for (int i = 0; i < 256; i++) {
       #pragma HLS PIPELINE II=1
       #pragma HLS UNROLL factor=8
