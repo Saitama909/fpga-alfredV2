@@ -1,11 +1,8 @@
 {
   "test_branches": [
     "local",
-    "adi-testing",
-    "jovan-mvp",
-    "main",
-    "riley-test-suite",
-    "riley-testing",
-    "william_full_kyber"
-  ]
+    "batching",
+    "adi/software-polymul",
+    "main"
+    ]
 }
