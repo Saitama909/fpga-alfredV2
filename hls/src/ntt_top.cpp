@@ -12,13 +12,25 @@
 */
 static const int BUTTERFLY_PAR = 8;
 
+/*
+  POLY_MUL_BATCH: polys packed into one dispatch (amortises ~40 us XRT tax).
+  Defined in ntt_top.h (default 128). Must match host --batch / -b.
+  Set Vitis HLS top to pqcrystals_kyber768_ref_poly_mul_batch.
+  -Riley
+*/
+#define POLY_MUL_BATCH_COEFFS (POLY_MUL_BATCH * 256)
+
 /* 
   AXI OUTSTANDING: in-flight m_axi requests. basically a BRAM vs latency trade off.
-  Reads matter more for a/b and writes for r. 4 has been fine so far without any drop in latency.
+  Reads matter more for a/b and writes for r. Keep lutram binds; bump carefully.
   -Riley
 */
 static const int AXI_READ_OUTSTANDING = 4;
 static const int AXI_WRITE_OUTSTANDING = 4;
+
+static const int AXI_MAX_READ_BURST_LENGTH = 256;
+static const int AXI_MAX_WRITE_BURST_LENGTH = 256;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 
@@ -164,6 +176,14 @@ void ntt(const int16_t in[256], int16_t out[256]) {
   #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
   #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
   #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
+  // Shallow cyclic banks must stay in LUTRAM — Vivado otherwise maps each
+  // bank to a RAMB18 (MEM_PAR banks × many bufs ≈ 384 BRAMs → won't fit KV260).
+  #pragma HLS BIND_STORAGE variable=buf1 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf2 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf3 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf4 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf5 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf6 type=ram_2p impl=lutram
   // dataflow style
   ntt_stage<128>(in,   buf1);
   ntt_stage<64> (buf1, buf2);
@@ -221,6 +241,12 @@ void invntt(const int16_t in[256], int16_t out[256]) {
   #pragma HLS ARRAY_PARTITION variable=buf4 cyclic factor=MEM_PAR dim=1
   #pragma HLS ARRAY_PARTITION variable=buf5 cyclic factor=MEM_PAR dim=1
   #pragma HLS ARRAY_PARTITION variable=buf6 cyclic factor=MEM_PAR dim=1
+  #pragma HLS BIND_STORAGE variable=buf1 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf2 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf3 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf4 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf5 type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=buf6 type=ram_2p impl=lutram
 
   invntt_stage<2,   false>(in,   buf1);
   invntt_stage<4,   false>(buf1, buf2);
@@ -376,42 +402,14 @@ static void copy_axi_out(const int16_t src[256], int16_t dst[256]) {
 }
 
 /*************************************************
-* Name:        poly_mul
+* Name:        poly_mul_core
 *
-* Description: r = a * b in Rq = Zq[X]/(X^256+1), via the NTT. Forward
-*              transform both operands, multiply pointwise, transform back.
-*              basemul contributes R^-1 and invntt contributes R, so the
-*              Montgomery factors cancel and r is the plain product mod q
-*              (lazily reduced: congruent mod q, not necessarily centered).
-*
-*              Inputs are copied into local buffers so the caller's arrays
-*              survive, and so the interface arrays stay unpartitioned.
-*
-* Arguments:   - const int16_t a[256], b[256]: input polynomials
-*              - int16_t r[256]: output polynomial
+* Description: One out-of-place poly multiply with local DATAFLOW. No AXI —
+*              callers (poly_mul / poly_mul_batch) own the m_axi ports so a
+*              batch loop can reuse one engine without N copies of the CU.
 **************************************************/
-void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
-  /*************************************************
-  Riley Notes:
-  - Separate bundles so the two operand reads can overlap under DATAFLOW instead of sharing one gmem and serialising (~217 cycles of copies).
-  - num_read/write_outstanding value can be twiddled to reduce BRAM usage. If it gets too low tho, can increase latency due to bus being congested. 4 seems to be working. 
-  *************************************************/
-  
-  #pragma HLS INTERFACE m_axi port=a offset=slave bundle=gmem0 depth=256 \
-      max_read_burst_length=256 max_write_burst_length=256 \
-      num_read_outstanding=AXI_READ_OUTSTANDING \
-      num_write_outstanding=AXI_WRITE_OUTSTANDING \
-      latency=8
-  #pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1 depth=256 \
-      max_read_burst_length=256 max_write_burst_length=256 \
-      num_read_outstanding=AXI_READ_OUTSTANDING \
-      num_write_outstanding=AXI_WRITE_OUTSTANDING \
-      latency=8
-  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem2 depth=256 \
-      max_read_burst_length=256 max_write_burst_length=256 \
-      num_read_outstanding=AXI_READ_OUTSTANDING \
-      num_write_outstanding=AXI_WRITE_OUTSTANDING \
-      latency=8
+static void poly_mul_core(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
+  #pragma HLS INLINE off
   #pragma HLS DATAFLOW
 
   int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
@@ -421,11 +419,16 @@ void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
   #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=MEM_PAR dim=1
   #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=MEM_PAR dim=1
   #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=MEM_PAR dim=1
+  #pragma HLS BIND_STORAGE variable=ta type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=tb type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=na type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=nb type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=tr type=ram_2p impl=lutram
+  #pragma HLS BIND_STORAGE variable=ti type=ram_2p impl=lutram
 
   copy_axi_in(a, ta);
   copy_axi_in(b, tb);
 
-  // separate processes under DATAFLOW, so these should run concurrently as two instances rather than sharing one
   ntt(ta, na);
   ntt(tb, nb);
 
@@ -433,4 +436,71 @@ void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
   invntt(tr, ti);
 
   copy_axi_out(ti, r);
+}
+
+/*************************************************
+* Name:        poly_mul
+*
+* Description: Single-poly AXI wrapper around poly_mul_core. Kept for csim/tb
+*              and as a fallback kernel name if the batch top is not linked.
+**************************************************/
+void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
+  #pragma HLS INTERFACE m_axi port=a offset=slave bundle=gmem0 depth=256 \
+      max_read_burst_length=AXI_MAX_READ_BURST_LENGTH max_write_burst_length=AXI_MAX_WRITE_BURST_LENGTH \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1 depth=256 \
+      max_read_burst_length=AXI_MAX_READ_BURST_LENGTH max_write_burst_length=AXI_MAX_WRITE_BURST_LENGTH \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem2 depth=256 \
+      max_read_burst_length=AXI_MAX_READ_BURST_LENGTH max_write_burst_length=AXI_MAX_WRITE_BURST_LENGTH \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE ap_ctrl_chain port=return
+
+  poly_mul_core(a, b, r);
+}
+
+/*************************************************
+* Name:        poly_mul_batch
+*
+* Description: POLY_MUL_BATCH independent multiplies in one dispatch. Same AXI
+*              levers as poly_mul; slots are contiguous (poly n at offset n*256).
+*              Set this as the Vitis HLS top function.
+**************************************************/
+void poly_mul_batch(const int16_t a[POLY_MUL_BATCH_COEFFS],
+                    const int16_t b[POLY_MUL_BATCH_COEFFS],
+                    int16_t r[POLY_MUL_BATCH_COEFFS]) {
+  /*************************************************
+  Riley Notes:
+  - Split bundles (gmem0/1/2) so a/b reads can overlap under DATAFLOW.
+  - Keep BIND_STORAGE lutram on ping-pong bufs (inside poly_mul_core).
+  - Host --batch must equal POLY_MUL_BATCH (currently 128).
+  *************************************************/
+
+  #pragma HLS INTERFACE m_axi port=a offset=slave bundle=gmem0 depth=POLY_MUL_BATCH_COEFFS \
+      max_read_burst_length=AXI_MAX_READ_BURST_LENGTH max_write_burst_length=AXI_MAX_WRITE_BURST_LENGTH \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE m_axi port=b offset=slave bundle=gmem1 depth=POLY_MUL_BATCH_COEFFS \
+      max_read_burst_length=AXI_MAX_READ_BURST_LENGTH max_write_burst_length=AXI_MAX_WRITE_BURST_LENGTH \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE m_axi port=r offset=slave bundle=gmem2 depth=POLY_MUL_BATCH_COEFFS \
+      max_read_burst_length=AXI_MAX_READ_BURST_LENGTH max_write_burst_length=AXI_MAX_WRITE_BURST_LENGTH \
+      num_read_outstanding=AXI_READ_OUTSTANDING \
+      num_write_outstanding=AXI_WRITE_OUTSTANDING \
+      latency=8
+  #pragma HLS INTERFACE ap_ctrl_chain port=return
+
+  for (int n = 0; n < POLY_MUL_BATCH; n++) {
+    #pragma HLS LOOP_TRIPCOUNT min=128 max=128
+    poly_mul_core(&a[n * 256], &b[n * 256], &r[n * 256]);
+  }
 }

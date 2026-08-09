@@ -35,8 +35,17 @@ void hls_poly_tomont(int16_t r[256]);
 void hls_poly_sub(int16_t r[256], const int16_t a[256], const int16_t b[256]);
 
 /* Fused top: r = a * b in Rq. Forward NTT of both operands, pointwise
-   multiply, inverse NTT. */
+   multiply, inverse NTT. POLY_MUL_BATCH packs that many into one dispatch. */
+#ifndef POLY_MUL_BATCH
+#define POLY_MUL_BATCH 128
+#endif
+
 #define poly_mul KYBER_NAMESPACE(poly_mul)
 void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]);
+
+#define poly_mul_batch KYBER_NAMESPACE(poly_mul_batch)
+void poly_mul_batch(const int16_t a[POLY_MUL_BATCH * 256],
+                    const int16_t b[POLY_MUL_BATCH * 256],
+                    int16_t r[POLY_MUL_BATCH * 256]);
 
 #endif /* NTT_TOP_H */

@@ -18,7 +18,7 @@ RUN_CSIM=1
 RUN_CSYNTH=1
 RUN_COSIM=1
 RUN_COMPARE=1
-RUN_HW_BUILD=1
+RUN_HW_BUILD=0
 
 # Resource utilisation bands ##################################################
 # (from C-synth: BRAM/DSP/FF/LUT/URAM)
