@@ -8,51 +8,70 @@
 #include "../src/reduction.h"
 #include "../src/ntt_top.h"
 
-// Centered representative in (-q/2, q/2]
 static int16_t center_mod_q(int32_t x) {
-  int32_t r = x % KYBER_Q;
-  if (r < 0) r += KYBER_Q;
-  if (r > KYBER_Q / 2) r -= KYBER_Q;
-  return (int16_t)r;
+    int32_t r = x % KYBER_Q;
+    if (r < 0) r += KYBER_Q;
+    if (r > KYBER_Q / 2) r -= KYBER_Q;
+    return (int16_t)r;
 }
 
 int main() {
-  srand(42);
+    static int16_t original[NTT_ACCEL_BATCH_SIZE * KYBER_N];
+    static int16_t work[NTT_ACCEL_BATCH_SIZE * KYBER_N];
+    static int16_t expected[NTT_ACCEL_BATCH_SIZE * KYBER_N];
 
-  int16_t orig[256];
-  int16_t work[256];
-
-  for (int i = 0; i < 256; i++) {
-    orig[i] = i-128;  // center_mod_q(rand() % KYBER_Q);
-    work[i] = orig[i];
-  }
-
-  ntt_accel(work);
-  invntt(work);
-
-  // invntt(ntt(r)) == r * MONT (mod q), per the ntt_top.cpp doc comment:
-  // invntt performs the inverse transform AND multiplies by the
-  // Montgomery factor 2^16 mod q.
-  // Outputs are only "lazily" reduced (range (-q, q), not fully centered),
-  // so compare as residues mod q rather than requiring exact equality.
-  int errors = 0;
-  for (int i = 0; i < 256; i++) {
-    int16_t expected = center_mod_q((int32_t)orig[i] * MONT);
-    int16_t got = center_mod_q(work[i]);
-    if (got != expected) {
-      if (errors < 10) {
-        printf("MISMATCH at %d: got %d (raw %d), expected %d (orig %d)\n",
-               i, got, work[i], expected, orig[i]);
-      }
-      errors++;
+    // Generate 128 different polynomials
+    for (int job = 0; job < NTT_ACCEL_BATCH_SIZE; ++job) {
+        for (int i = 0; i < KYBER_N; ++i) {
+            const int idx = job * KYBER_N + i;
+            original[idx] = (int16_t)(((i + 17 * job) % 256) - 128);
+            work[idx] = original[idx];
+            expected[idx] = original[idx];
+        }
+        // Compute direct forward NTT reference for each polynomial
+        ntt(&expected[job * KYBER_N]);
     }
-  }
 
-  if (errors == 0) {
-    printf("PASS: invntt(ntt(r)) == r * MONT (mod q) for all 256 coefficients\n");
-    return 0;
-  } else {
-    printf("FAIL: %d/%d coefficients mismatched\n", errors, 256);
+    // Run hardware accelerated batch kernel
+    ntt_accel((vec512_t*)work);
+
+    // 1. Direct Forward NTT Bit-Exact Comparison against C reference (ntt_top.h)
+    int fwd_errors = 0;
+    for (int idx = 0; idx < NTT_ACCEL_BATCH_SIZE * KYBER_N; ++idx) {
+        if (work[idx] != expected[idx]) {
+            if (fwd_errors < 10) {
+                printf("FORWARD MISMATCH job=%d coeff=%d: got %d, expected %d\n",
+                       idx / KYBER_N, idx % KYBER_N, work[idx], expected[idx]);
+            }
+            fwd_errors++;
+        }
+    }
+
+    // 2. Inverse NTT Roundtrip Verification (invntt(ntt(r)) == r * MONT mod q)
+    int inv_errors = 0;
+    for (int job = 0; job < NTT_ACCEL_BATCH_SIZE; ++job) {
+        int16_t *poly = &work[job * KYBER_N];
+        invntt(poly);
+        for (int i = 0; i < KYBER_N; ++i) {
+            const int idx = job * KYBER_N + i;
+            int16_t exp_val = center_mod_q((int32_t)original[idx] * MONT);
+            int16_t got_val = center_mod_q(poly[i]);
+            if (got_val != exp_val) {
+                if (inv_errors < 10) {
+                    printf("INVERSE MISMATCH job=%d coeff=%d: got %d, expected %d\n",
+                           job, i, got_val, exp_val);
+                }
+                inv_errors++;
+            }
+        }
+    }
+
+    if (fwd_errors == 0 && inv_errors == 0) {
+        printf("PASS: Direct Forward NTT reference match & Inverse NTT verification for all %d polynomials!\n",
+               NTT_ACCEL_BATCH_SIZE);
+        return 0;
+    }
+
+    printf("FAIL: %d forward errors, %d inverse errors\n", fwd_errors, inv_errors);
     return 1;
-  }
 }

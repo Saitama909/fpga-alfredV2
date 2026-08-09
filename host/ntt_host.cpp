@@ -8,30 +8,27 @@
 #include <xrt/xrt_device.h>
 #include <xrt/xrt_bo.h>
 #include <xrt/xrt_kernel.h>
-
-// Notes for myself so ik what's going on
-// Generate polynomials cpu, XRT buffer, use AXI-Lite to tell FPGA where the addresses are
-// Run FPGA accelerator, check until completion, read results, then run NTT on CPU and compare. 
+#include <xrt/experimental/xrt_ip.h>
 
 
-// Kyber-768 NTT Constant Zeta Table
+// Kyber-768 NTT Constant Zeta Table (matched with hls/src/ntt_top.cpp)
 static const int16_t zetas[128] = {
-    -1044,  -758,   -64, -1011,  -313, -1009,   657, -1453,
-     1078,  -554,  -242,   -56,  1023, -1198,   641,  1110,
-      446,  1068,  -982,  -977,   118,  -266,   471,   -62,
-    -1082, -1012,  -644,    67,   703,   725,  -702,  -923,
-     -926,   461,  1214,   356, -1231,   276,   390,  -557,
-     -733,   834,   604,   608,   838,  -539,  -408,  -152,
-     -344,  -340,  1041,  -909,   891,   984,  -157, -1047,
-      998, -1050,  -875,   767,  -522,   999,   607,  -665,
-     1087, -1172,  -630,  -889,  1056,  -985,  -346,  1033,
-     1163,  -237,  -239,   341,   813,   734,  -462,  -686,
-    -1051,  -727,   709,   647,   920,  -908,   109,  -110,
-      418,  -763,  -412,  -956,   478,   728,   185,   415,
-      902,  -483,  1128,  1060,   515,  -741,  -384, -1141,
-     -993,   919,  -805,   -18,  1049,  -352,   -97,  -809,
-      870,   420,   526,  -678,   760,   265,   674,  -668,
-     -820,   476,  1115,  -142, -1136,   229,  -538,  -962
+    -1044,  -758,  -359, -1517,  1493,  1422,   287,   202,
+     -171,   622,  1577,   182,   962, -1202, -1474,  1468,
+      573, -1325,   264,   383,  -829,  1458, -1602,  -130,
+     -681,  1017,   732,   608, -1542,   411,  -205, -1571,
+     1223,   652,  -552,  1015, -1293,  1491,  -282, -1544,
+      516,    -8,  -320,  -666, -1618, -1162,   126,  1469,
+     -853,   -90,  -271,   830,   107, -1421,  -247,  -951,
+     -398,   961, -1508,  -725,   448, -1065,   677, -1275,
+    -1103,   430,   555,   843, -1251,   871,  1550,   105,
+      422,   587,   177,  -235,  -291,  -460,  1574,  1653,
+     -246,   778,  1159,  -147,  -777,  1483,  -602,  1119,
+    -1590,   644,  -872,   349,   418,   329,  -156,   -75,
+      817,  1097,   603,   610,  1322, -1285, -1465,   384,
+    -1215,  -136,  1218, -1335,  -874,   220, -1187, -1659,
+    -1185, -1530, -1278,   794, -1510,  -854,  -870,   478,
+     -108,  -308,   996,   991,   958, -1460,  1522,  1628
 };
 
 static int16_t fqmul(int16_t a, int16_t b) {
@@ -58,7 +55,7 @@ static void ntt_ref(int16_t r[256]) {
     }
 }
 
-// Bundling DRAM buffer, CPU pointer and the physical address on FPGA. 
+// Bundling DRAM buffer, CPU pointer and the physical address on FPGA.
 struct RingBufferSlot {
     xrt::bo device_buffer;
     int16_t* host_memory_ptr;
@@ -66,87 +63,121 @@ struct RingBufferSlot {
 };
 
 int main(int argc, char** argv) {
-    std::string xclbin_path = (argc > 1) ? argv[1] : "ntt_dataflow_200mhz.xclbin";
-    size_t total_jobs = (argc > 2) ? std::stoul(argv[2]) : 10000;
+    std::string xclbin_path = (argc > 1) ? argv[1] : "ntt_fresh.xclbin";
+    size_t total_jobs = (argc > 2) ? std::stoul(argv[2]) : 10240;
+
+    constexpr size_t BATCH_SIZE = 128;      // NTTs per batch
+    constexpr size_t RING_CAPACITY = 32;    // Circular slots
+
+    if (total_jobs % BATCH_SIZE != 0) {
+        std::cerr << "ERROR: total_jobs must be a multiple of " << BATCH_SIZE << "\n";
+        return 1;
+    }
 
     std::cout << "=======================================================\n";
-    std::cout << " Stage 3: Direct MMIO & Circular Ring Buffer FIFO      \n";
+    std::cout << " Batched NTT Accelerator Host                          \n";
     std::cout << " Bitstream: " << xclbin_path << "\n";
-    std::cout << " Workload : " << total_jobs << " NTT jobs\n";
+    std::cout << " Workload : " << total_jobs << " NTT jobs (" << (total_jobs / BATCH_SIZE) << " batches)\n";
     std::cout << "=======================================================\n";
 
     // Initialize XRT Device and Kernel
     xrt::device device(0);
     auto uuid = device.load_xclbin(xclbin_path);
-    
-    // For AXI-Lite control regs 
+
+    // For AXI-Lite control regs
     xrt::ip ip_control(device, uuid, "ntt_accel");
 
-    constexpr size_t BATCH_SIZE = 128;      // NTTs per batch 
-    constexpr size_t RING_CAPACITY = 32;    // How many circular slots (tried 2,4,8,16,32,64)
     size_t slot_bytes = BATCH_SIZE * 256 * sizeof(int16_t); // 64 KB
 
     std::vector<RingBufferSlot> ring(RING_CAPACITY);
     for (size_t i = 0; i < RING_CAPACITY; ++i) {
         ring[i].device_buffer = xrt::bo(device, slot_bytes, xrt::bo::flags::normal, 0);
-        ring[i].host_memory_ptr = ring[i].device_buffer.map<int16_t*>(); // For virtual CPU pointer
-        ring[i].physical_dram_address = ring[i].device_buffer.address(); // For DRAM HW address (all from struct)
+        ring[i].host_memory_ptr = ring[i].device_buffer.map<int16_t*>();
+        ring[i].physical_dram_address = ring[i].device_buffer.address();
     }
 
-
-    // Multiples of 128 ignored but it's fine right now we can just put limitations or something 
     size_t total_batches = total_jobs / BATCH_SIZE;
     int verification_errors = 0;
 
-    // For end to end time
-    auto start_time = std::chrono::high_resolution_clock::now();
+    double total_cpu_us = 0.0;
+    double total_e2e_us = 0.0;
+    double total_kernel_us = 0.0;
 
     for (size_t batch_idx = 0; batch_idx < total_batches; ++batch_idx) {
         uint32_t current_slot = batch_idx % RING_CAPACITY;
         RingBufferSlot& slot = ring[current_slot];
 
-        // for my ref, expected_outputs[5][17] means coeff 17 of NTT job 5
-        std::vector<std::vector<int16_t>> expected_outputs(BATCH_SIZE, std::vector<int16_t>(256));
+        // ------------------------------------------------
+        // PREPARE INPUT — NOT TIMED FOR ACCELERATOR
+        // ------------------------------------------------
+        std::vector<int16_t> expected(BATCH_SIZE * 256);
 
-        // Populate CPU virtual memory pointer with 128 NTTs
         for (size_t k = 0; k < BATCH_SIZE; ++k) {
             for (int i = 0; i < 256; ++i) {
-                int16_t sample_val = (i * 11 + batch_idx * 128 + k) % 3329;
-                slot.host_memory_ptr[k * 256 + i] = sample_val;
-                expected_outputs[k][i] = sample_val; // FPGA overwrites buffer so we need copy for CPU
+                int16_t sample_val = (i * 11 + batch_idx * BATCH_SIZE + k) % 3329;
+                size_t idx = k * 256 + i;
+                slot.host_memory_ptr[idx] = sample_val;
+                expected[idx] = sample_val;
             }
         }
-        
-        // Flush CPU cache lines (data written to DRAM)
+
+        // Calculate CPU expected values (timed for CPU baseline comparison)
+        auto cpu_start = std::chrono::high_resolution_clock::now();
+        for (size_t k = 0; k < BATCH_SIZE; ++k) {
+            ntt_ref(expected.data() + k * 256);
+        }
+        auto cpu_end = std::chrono::high_resolution_clock::now();
+        total_cpu_us += std::chrono::duration<double, std::micro>(cpu_end - cpu_start).count();
+
+        // ------------------------------------------------
+        // END-TO-END ACCELERATOR TIMER
+        // ------------------------------------------------
+        auto e2e_start = std::chrono::high_resolution_clock::now();
+
         slot.device_buffer.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
+        // Tell kernel which BO contains the entire batch.
+        ip_control.write_register(
+            0x10,
+            static_cast<uint32_t>(slot.physical_dram_address & 0xFFFFFFFF)
+        );
 
-        // AXI Lite control regs 
-        //    - Bit 0 (0x01): ap_start -> Writing 1 commands FPGA logic to START computation
-        //    - Bit 1 (0x02): ap_done  -> Read as 1 when FPGA hardware finishes execution.
-        //    - Bit 2 (0x04): ap_idle  -> Read as 1 when FPGA kernel is idle
+        ip_control.write_register(
+            0x14,
+            static_cast<uint32_t>(slot.physical_dram_address >> 32)
+        );
 
-        // Write physical DRAM address to registers 0x10 & 0x14 (low/high 32 bits respectively)
-        ip_control.write_register(0x10, static_cast<uint32_t>(slot.physical_dram_address & 0xFFFFFFFF));
-        ip_control.write_register(0x14, static_cast<uint32_t>(slot.physical_dram_address >> 32));
-        
-        // ap_start
+        // ------------------------------------------------
+        // KERNEL-ONLY TIMER
+        // ------------------------------------------------
+        auto kernel_start = std::chrono::high_resolution_clock::now();
+
         ip_control.write_register(0x00, 0x01);
 
-
-        // while the ap_done bit isn't set yet we keep going
         while ((ip_control.read_register(0x00) & 0x02) == 0) {
-
         }
 
-        // Get output back!
+        auto kernel_end = std::chrono::high_resolution_clock::now();
+
         slot.device_buffer.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
 
-        // Verify against CPU reference NTT
+        auto e2e_end = std::chrono::high_resolution_clock::now();
+
+        total_kernel_us += std::chrono::duration<double, std::micro>(
+            kernel_end - kernel_start
+        ).count();
+
+        total_e2e_us += std::chrono::duration<double, std::micro>(
+            e2e_end - e2e_start
+        ).count();
+
+        // ------------------------------------------------
+        // VERIFY — NOT TIMED
+        // ------------------------------------------------
         for (size_t k = 0; k < BATCH_SIZE; ++k) {
-            ntt_ref(expected_outputs[k].data());
             for (int i = 0; i < 256; ++i) {
-                if (slot.host_memory_ptr[k * 256 + i] != expected_outputs[k][i]) {
+                size_t idx = k * 256 + i;
+                if (slot.host_memory_ptr[idx] != expected[idx]) {
                     verification_errors++;
                     break;
                 }
@@ -154,15 +185,23 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double total_time_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
     size_t executed_jobs = total_batches * BATCH_SIZE;
+    double cpu_lat = total_cpu_us / executed_jobs;
+    double kernel_lat = total_kernel_us / executed_jobs;
+    double e2e_lat = total_e2e_us / executed_jobs;
 
     std::cout << "\n=======================================================\n";
-    std::cout << " Result : " << (verification_errors == 0 ? "PASS (100% Correct)" : "FAIL") << "\n";
-    std::cout << " Latency with ring buffer : " << std::fixed << std::setprecision(3) << (total_time_us / executed_jobs) << " us / NTT\n";
-    std::cout << " Sustained Throughput: " << std::setprecision(1) << (executed_jobs / (total_time_us / 1e6)) << " NTTs / sec\n";
+    std::cout << " Result: " << (verification_errors == 0 ? "PASS" : "FAIL") << "\n";
+    std::cout << " Batch size: " << BATCH_SIZE << "\n";
+    std::cout << " CPU reference latency per NTT: " << std::fixed << std::setprecision(3) << cpu_lat << " us\n";
+    std::cout << " Kernel/control latency per NTT: " << kernel_lat << " us\n";
+    std::cout << " Transfer + kernel latency per NTT: " << e2e_lat << " us\n";
+    std::cout << " Kernel-only Speedup vs CPU: " << std::setprecision(2) << (total_cpu_us / total_kernel_us) << "x\n";
+    std::cout << " End-to-End Speedup vs CPU: " << (total_cpu_us / total_e2e_us) << "x\n";
+    std::cout << " End-to-end accelerator throughput: " << std::setprecision(1) << (executed_jobs / (total_e2e_us / 1e6)) << " NTT/s\n";
     std::cout << "=======================================================\n";
 
-    return 0;
+    return (verification_errors == 0 ? 0 : 1);
 }
+
+
