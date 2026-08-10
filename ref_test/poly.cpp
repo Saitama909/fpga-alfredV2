@@ -260,7 +260,10 @@ void poly_getnoise_eta2(poly *r, const uint8_t seed[KYBER_SYMBYTES], uint8_t non
 **************************************************/
 void poly_ntt(poly *r)
 {
-  ntt(r->coeffs);
+  int16_t tmp[256];
+  ntt(r->coeffs, tmp);
+  for (unsigned int i = 0; i < KYBER_N; i++)
+    r->coeffs[i] = tmp[i];
   poly_reduce(r);
 }
 
@@ -275,6 +278,93 @@ void poly_ntt(poly *r)
 **************************************************/
 void poly_invntt_tomont(poly *r)
 {
-  invntt(r->coeffs);
+  int16_t tmp[256];
+  invntt(r->coeffs, tmp);
+  for (unsigned int i = 0; i < KYBER_N; i++)
+    r->coeffs[i] = tmp[i];
 }
 
+/*************************************************
+* Name:        poly_basemul_montgomery
+*
+* Description: Multiplication of two polynomials in NTT domain
+*
+* Arguments:   - poly *r: pointer to output polynomial
+*              - const poly *a: pointer to first input polynomial
+*              - const poly *b: pointer to second input polynomial
+**************************************************/
+void poly_basemul_montgomery(poly *r, const poly *a, const poly *b)
+{
+  unsigned int i;
+  for(i=0;i<KYBER_N/4;i++) {
+    basemul(a->coeffs[4*i],   a->coeffs[4*i+1],
+            b->coeffs[4*i],   b->coeffs[4*i+1],
+            zetas[64+i], r->coeffs[4*i], r->coeffs[4*i+1]);
+    basemul(a->coeffs[4*i+2], a->coeffs[4*i+3],
+            b->coeffs[4*i+2], b->coeffs[4*i+3],
+            -zetas[64+i], r->coeffs[4*i+2], r->coeffs[4*i+3]);
+  }
+}
+
+/*************************************************
+* Name:        poly_tomont
+*
+* Description: Inplace conversion of all coefficients of a polynomial
+*              from normal domain to Montgomery domain
+*
+* Arguments:   - poly *r: pointer to input/output polynomial
+**************************************************/
+void poly_tomont(poly *r)
+{
+  unsigned int i;
+  const int16_t f = (1ULL << 32) % KYBER_Q;
+  for(i=0;i<KYBER_N;i++)
+    r->coeffs[i] = montgomery_reduce((int32_t)r->coeffs[i]*f);
+}
+
+/*************************************************
+* Name:        poly_reduce
+*
+* Description: Applies Barrett reduction to all coefficients of a polynomial
+*              for details of the Barrett reduction see comments in reduce.c
+*
+* Arguments:   - poly *r: pointer to input/output polynomial
+**************************************************/
+void poly_reduce(poly *r)
+{
+  unsigned int i;
+  for(i=0;i<KYBER_N;i++)
+    r->coeffs[i] = barrett_reduce(r->coeffs[i]);
+}
+
+/*************************************************
+* Name:        poly_add
+*
+* Description: Add two polynomials; no modular reduction is performed
+*
+* Arguments: - poly *r: pointer to output polynomial
+*            - const poly *a: pointer to first input polynomial
+*            - const poly *b: pointer to second input polynomial
+**************************************************/
+void poly_add(poly *r, const poly *a, const poly *b)
+{
+  unsigned int i;
+  for(i=0;i<KYBER_N;i++)
+    r->coeffs[i] = a->coeffs[i] + b->coeffs[i];
+}
+
+/*************************************************
+* Name:        poly_sub
+*
+* Description: Subtract two polynomials; no modular reduction is performed
+*
+* Arguments: - poly *r:       pointer to output polynomial
+*            - const poly *a: pointer to first input polynomial
+*            - const poly *b: pointer to second input polynomial
+**************************************************/
+void poly_sub(poly *r, const poly *a, const poly *b)
+{
+  unsigned int i;
+  for(i=0;i<KYBER_N;i++)
+    r->coeffs[i] = a->coeffs[i] - b->coeffs[i];
+}
