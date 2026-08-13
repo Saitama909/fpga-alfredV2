@@ -43,11 +43,13 @@ using clk = std::chrono::steady_clock;
    poly_mul is the cosim measurement; the per-module figures are csynth
    estimates, which have run 2-3% optimistic. */
 constexpr double KERNEL_MHZ         = 200.0;
-constexpr int    HW_CYCLES_NTT      = 273;
-constexpr int    HW_CYCLES_INVNTT   = 294;
-constexpr int    HW_CYCLES_BASEMUL  =  42;
-constexpr int    HW_CYCLES_POLY_MUL = 906;   // cosim, whole kernel
-constexpr int    HW_CYCLES_INTERVAL = 218;   // steady-state, back-to-back
+constexpr int    HW_CYCLES_NTT      = 273;   // csynth, pqcrystals_..._ntt
+constexpr int    HW_CYCLES_INVNTT   = 294;   // csynth, pqcrystals_..._invntt
+constexpr int    HW_CYCLES_BASEMUL  =  42;   // csynth, hls_poly_basemul
+constexpr int    HW_CYCLES_POLY_MUL = 681;   // csynth latency, fused poly_mul
+/* Per-polynomial steady state under the batch top: top-level interval 8192
+   over 256 polynomials.  */
+constexpr int    HW_CYCLES_INTERVAL =  32;
 
 static constexpr double hw_ns(int cycles) { return cycles * 1000.0 / KERNEL_MHZ; }
 
@@ -169,9 +171,11 @@ int main() {
   const int sb_iters = std::max(ITERS / 50, 1);        // textbook_version is far slower
   row("textbook", time_batches(f_textbook, sb_iters), 0.0);
 
-  std::printf("\n  NOTE/TODO: kernel figures are COMPUTE ONLY AND FROM COSIM " 
-              "  they exclude dispatch and data transfer, so these ratios are an upper bound on end-to-end speedup.\n"
-              "  steady-state kernel throughput is %.0f ns per multiply (interval %d).\n",
+  std::printf("\n  NOTE: kernel figures are COMPUTE-ONLY csynth latencies. They exclude\n"
+              "  dispatch and data transfer, so these ratios are an upper bound on\n"
+              "  end-to-end speedup run polymul host application for the measured end-to-end numbers.\n"
+              "  Steady-state kernel throughput is %.0f ns per multiply (interval %d),\n"
+              "  which is the ceiling batching converges towards.\n",
               hw_ns(HW_CYCLES_INTERVAL), HW_CYCLES_INTERVAL);
 
   (void)sink; // tell the compiler not to optimise away the work just because we don't use the result.
