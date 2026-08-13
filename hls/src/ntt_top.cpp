@@ -87,7 +87,11 @@
   **************************************************/
   static int16_t fqmul(int16_t a, int16_t b) {
     #pragma HLS INLINE
-    return montgomery_reduce((int32_t)a*b);
+    // latency=1 splits the multiply over two cycles to shorten the critical
+    // path and meet timing.
+    int32_t p = (int32_t)a*b;
+    #pragma HLS BIND_OP variable=p op=mul impl=dsp latency=1
+    return montgomery_reduce(p);
   }
 
 
