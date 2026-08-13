@@ -284,9 +284,10 @@ void basemul(int16_t a0, int16_t a1,
 void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
   #pragma HLS INLINE off
   for (int i = 0; i < 64; i++) {
-    // BASEMUL_UNROLL keeps basemul II in step with the NTT stages
+    /* UNROLL 2 matches kyber_enc cyclic-8 banks (William). BASEMUL_UNROLL=4
+       was for MEM_PAR=16 NTT locals and oversubscribed the enc buffers. */
     #pragma HLS PIPELINE II=1
-    #pragma HLS UNROLL factor=BASEMUL_UNROLL
+    #pragma HLS UNROLL factor=2
     int16_t z = (int16_t)zetas[64 + i];
     basemul(a[4 * i],     a[4 * i + 1], b[4 * i],     b[4 * i + 1],  z, r[4 * i],     r[4 * i + 1]);
     basemul(a[4 * i + 2], a[4 * i + 3], b[4 * i + 2], b[4 * i + 3], -z, r[4 * i + 2], r[4 * i + 3]);
@@ -294,19 +295,31 @@ void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]
 }
 
 void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-  for (int i = 0; i < 256; i++)
+  #pragma HLS INLINE off
+  for (int i = 0; i < 256; i++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=8
     r[i] = a[i] + b[i];
+  }
 }
 
 void hls_poly_reduce(int16_t r[256]) {
-  for (int i = 0; i < 256; i++)
+  #pragma HLS INLINE off
+  for (int i = 0; i < 256; i++) {
+    #pragma HLS PIPELINE II=1
+    #pragma HLS UNROLL factor=8
     r[i] = barrett_reduce(r[i]);
+  }
 }
 
 void hls_polyvec_basemul_acc(int16_t r[256],
                              const int16_t a[KYBER_K][256],
                              const int16_t b[KYBER_K][256]) {
   int16_t t[256];
+  /* Match kyber_enc_core's ENC_MEM_PAR=8 (not NTT MEM_PAR=16) so basemul
+     ports line up with the caller's cyclic-8 banks. */
+  #pragma HLS ARRAY_PARTITION variable=t cyclic factor=8 dim=1
+  #pragma HLS BIND_STORAGE variable=t type=ram_2p impl=lutram
   hls_poly_basemul(r, a[0], b[0]);
   for (int i = 1; i < KYBER_K; i++) {
     hls_poly_basemul(t, a[i], b[i]);
@@ -320,6 +333,13 @@ void hls_matvec_ntt(int16_t out[KYBER_K + 1][256],
                     const int16_t s_hat[KYBER_K][256]) {
   for (int i = 0; i < KYBER_K + 1; i++)
     hls_polyvec_basemul_acc(out[i], A[i], s_hat);
+}
+
+/* Forward NTT then Barrett-reduce each coeff -- matches ref poly_ntt. */
+void hls_poly_ntt(const int16_t in[256], int16_t out[256]) {
+  #pragma HLS INLINE off
+  ntt(in, out);
+  hls_poly_reduce(out);
 }
 
 /*************************************************
