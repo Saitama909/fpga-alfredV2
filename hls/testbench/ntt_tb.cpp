@@ -1,19 +1,11 @@
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <stdint.h>
 
 #include "../src/params.h"
 #include "../src/reduction.h"
 #include "../src/ntt_top.h"
-
-// Centered representative in (-q/2, q/2]
-static int16_t center_mod_q(int32_t x) {
-  int32_t r = x % KYBER_Q;
-  if (r < 0) r += KYBER_Q;
-  if (r > KYBER_Q / 2) r -= KYBER_Q;
-  return (int16_t)r;
-}
+#include "ref_poly.h"
 
 int main() {
   srand(42);

@@ -5,27 +5,7 @@
 #include "../src/params.h"
 #include "../src/reduction.h"
 #include "../src/ntt_top.h"
-
-// Centered representative in (-q/2, q/2]
-static int16_t center_mod_q(int64_t x) {
-  int64_t r = x % KYBER_Q;
-  if (r < 0) r += KYBER_Q;
-  if (r > KYBER_Q / 2) r -= KYBER_Q;
-  return (int16_t)r;
-}
-
-// Textbook product in Zq[X]/(X^256+1). Independent of the hls NTT, so wrong twiddle table cannot satisfy both.
-static void ref_poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
-  int64_t acc[512] = {0};
-
-  for (int i = 0; i < 256; i++)
-    for (int j = 0; j < 256; j++)
-      acc[i + j] += (int64_t)a[i] * b[j];
-
-  // X^256 == -1, so the upper half folds back with a sign flip
-  for (int k = 0; k < 256; k++)
-    r[k] = center_mod_q(acc[k] - acc[k + 256]);
-}
+#include "ref_poly.h"
 
 int main() {
   srand(42);
