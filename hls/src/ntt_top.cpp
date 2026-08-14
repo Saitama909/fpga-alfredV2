@@ -87,7 +87,11 @@
   **************************************************/
   static int16_t fqmul(int16_t a, int16_t b) {
     #pragma HLS INLINE
-    return montgomery_reduce((int32_t)a*b);
+    // latency=1 splits the multiply over two cycles to shorten the critical
+    // path and meet timing.
+    int32_t p = (int32_t)a*b;
+    #pragma HLS BIND_OP variable=p op=mul impl=dsp latency=1
+    return montgomery_reduce(p);
   }
 
 
@@ -119,10 +123,13 @@
   /*************************************************
   * Name:        ntt
   *
-  * Description: Inplace number-theoretic transform (NTT) in Rq.
-  *              input is in standard order, output is in bitreversed order
+  * Description: Number-theoretic transform (NTT) in Rq. Out-of-place although the
+  *              reference is in-place. writing each of the 7 stages into
+  *              its own buffer lets DATAFLOW pipeline them.
+  *              Input is in standard order, output is in bitreversed order.
   *
-  * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
+  * Arguments:   - const int16_t in[256]:  input vector of elements of Zq
+  *              - int16_t out[256]:       output vector, distinct from in
   **************************************************/
 
   void ntt(const int16_t in[256], int16_t out[256]) {
@@ -176,13 +183,15 @@
   }
 
   /*************************************************
-  * Name:        invntt_tomont
+  * Name:        invntt
   *
-  * Description: Inplace inverse number-theoretic transform in Rq and
-  *              multiplication by Montgomery factor 2^16.
-  *              Input is in bitreversed order, output is in standard order
+  * Description: Inverse number-theoretic transform in Rq, with multiplication
+  *              by the Montgomery factor 2^16. Out-of-place for the same
+  *              reason as ntt. Input is in bitreversed order, output is in
+  *              standard order.
   *
-  * Arguments:   - int16_t r[256]: pointer to input/output vector of elements of Zq
+  * Arguments:   - const int16_t in[256]:  input vector of elements of Zq
+  *              - int16_t out[256]:       output vector, distinct from in
   **************************************************/
   void invntt(const int16_t in[256], int16_t out[256]) {
     #pragma HLS INLINE off
@@ -299,16 +308,6 @@
       r[i] = a[i] - b[i];
   }
 
-  static void copy_poly(const int16_t in[256], int16_t out[256]) {
-    #pragma HLS INLINE off
-    for (int i = 0; i < 256; i++) {
-      // 8 coefficients per cycle: needs the caller's buffers cyclic-8 partitioned
-      #pragma HLS PIPELINE II=1
-      #pragma HLS UNROLL factor=8
-      out[i] = in[i];
-    }
-  }
-
   /*************************************************
   * Name:        poly_mul
   *
@@ -318,42 +317,160 @@
   *              Montgomery factors cancel and r is the plain product mod q
   *              (lazily reduced: congruent mod q, not necessarily centered).
   *
-  *              Inputs are copied into local buffers so the caller's arrays
-  *              survive, and so the interface arrays stay unpartitioned and
-  *              this can become an m_axi kernel later.
-  *
   * Arguments:   - const int16_t a[256], b[256]: input polynomials
   *              - int16_t r[256]: output polynomial
   **************************************************/
   void poly_mul(const int16_t a[256], const int16_t b[256], int16_t r[256]) {
-    // vitis  infers m_axi for a/b/r, but puts all three
-    // on one shared gmem bundle. it serialises the two input
-    // copies (107+107 = ~217 cycles) and is what sets the top-level interval of
-    // 218 while every compute block runs at interval 32.
-    // TODO: split the bundles so the operand reads can overlap.
-    // #pragma HLS INTERFACE mode=m_axi port=a bundle=gmem0 depth=256
-    // #pragma HLS INTERFACE mode=m_axi port=b bundle=gmem1 depth=256
-    // #pragma HLS INTERFACE mode=m_axi port=r bundle=gmem2 depth=256
+    // inlining this is a structural choice poly_mul_batch wraps this call in its own
+    // DATAFLOW region, and inlining here would merge these processes into the
+    // caller's and destroy both structures.
+    #pragma HLS INLINE off
     #pragma HLS DATAFLOW
-
-    int16_t ta[256], tb[256], na[256], nb[256], tr[256], ti[256];
-    #pragma HLS ARRAY_PARTITION variable=ta cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=tb cyclic factor=8 dim=1
+    
+    int16_t na[256], nb[256], tr[256];
     #pragma HLS ARRAY_PARTITION variable=na cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=nb cyclic factor=8 dim=1
     #pragma HLS ARRAY_PARTITION variable=tr cyclic factor=8 dim=1
-    #pragma HLS ARRAY_PARTITION variable=ti cyclic factor=8 dim=1
-
-    copy_poly(a, ta);
-    copy_poly(b, tb);
 
     // separate processes under DATAFLOW, so these should run concurrently as two
     // instances rather than sharing one
-    ntt(ta, na);
-    ntt(tb, nb);
+    ntt(a, na);
+    ntt(b, nb);
 
     hls_poly_basemul(tr, na, nb);
-    invntt(tr, ti);
+    invntt(tr, r);
+  }
 
-    copy_poly(ti, r);
+  /* Whole-batch streaming interface.
+    notes
+
+     One request per port per dispatch. it splits it into AXI
+     bursts of max_read_burst_length internally and keeps up to 16 in flight from my undestanding.
+     so the round trip is paid once rather than once per polynomial. 
+  */
+  static void read_all(hls::burst_maxi<poly_word_t>& m,
+                       hls::stream<poly_word_t>& s,
+                       unsigned batch_count) {
+    #pragma HLS INLINE off
+
+    const unsigned total = batch_count * POLY_MUL_WORDS_PER_POLY;
+
+    m.read_request(0, total);
+
+    read_all_loop:
+    for (unsigned w = 0; w < total; ++w) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS LOOP_TRIPCOUNT \
+          min=POLY_MUL_WORDS_PER_POLY \
+          max=POLY_MUL_MAX_BATCH*POLY_MUL_WORDS_PER_POLY
+
+      s.write(m.read());
+    }
+  }
+
+
+  static void write_all(hls::burst_maxi<poly_word_t>& m,
+                        hls::stream<poly_word_t>& s,
+                        unsigned batch_count) {
+    #pragma HLS INLINE off
+    const unsigned total = batch_count * POLY_MUL_WORDS_PER_POLY;
+    m.write_request(0, total);
+    write_all_loop:
+    for (unsigned w = 0; w < total; ++w) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS LOOP_TRIPCOUNT \
+          min=POLY_MUL_WORDS_PER_POLY \
+          max=POLY_MUL_MAX_BATCH*POLY_MUL_WORDS_PER_POLY
+      m.write(s.read());
+    }
+    m.write_response();
+  }
+
+  // Stream <-> partitioned buffer. 
+  static void unpack_poly(hls::stream<poly_word_t> &s, int16_t out[256]) {
+    #pragma HLS INLINE off
+    unpack_loop: for (int w = 0; w < POLY_MUL_WORDS_PER_POLY; w++) {
+      #pragma HLS PIPELINE II=1
+      poly_word_t v = s.read();
+      for (int k = 0; k < POLY_MUL_COEFFS_PER_WORD; k++) {
+        #pragma HLS UNROLL
+        out[w * POLY_MUL_COEFFS_PER_WORD + k] =
+            (int16_t)(uint16_t)v.range(16 * k + 15, 16 * k);
+      }
+    }
+  }
+
+  static void pack_poly(const int16_t in[256], hls::stream<poly_word_t> &s) {
+    #pragma HLS INLINE off
+    pack_loop: for (int w = 0; w < POLY_MUL_WORDS_PER_POLY; w++) {
+      #pragma HLS PIPELINE II=1
+      poly_word_t v;
+      for (int k = 0; k < POLY_MUL_COEFFS_PER_WORD; k++) {
+        #pragma HLS UNROLL
+        v.range(16 * k + 15, 16 * k) =
+            (ap_uint<16>)(uint16_t)in[w * POLY_MUL_COEFFS_PER_WORD + k];
+      }
+      s.write(v);
+    }
+  }
+
+  //One polynomial per iteration, operands taken from the prefetch streams.
+  static void compute_all(hls::stream<poly_word_t> &sa,
+                          hls::stream<poly_word_t> &sb,
+                          hls::stream<poly_word_t> &sr,
+                          unsigned batch_count) {
+    #pragma HLS INLINE off
+    batch_loop:
+    for (unsigned n = 0; n < batch_count; ++n) {
+      #pragma HLS DATAFLOW
+      #pragma HLS LOOP_TRIPCOUNT min=1 max=POLY_MUL_MAX_BATCH
+      int16_t la[256], lb[256], lr[256];
+      #pragma HLS ARRAY_PARTITION variable=la cyclic factor=8 dim=1
+      #pragma HLS ARRAY_PARTITION variable=lb cyclic factor=8 dim=1
+      #pragma HLS ARRAY_PARTITION variable=lr cyclic factor=8 dim=1
+
+      unpack_poly(sa, la);
+      unpack_poly(sb, lb);
+      poly_mul(la, lb, lr);
+      pack_poly(lr, sr);
+    }
+  }
+
+  /*************************************************
+  * Name:        poly_mul_batch
+  *
+  * Description: Up to POLY_MUL_MAX_BATCH independent products per dispatch.
+  *
+  *              Batching to amortise overhead, increasing throughput. A dispatch costs ~35 us
+  *              measured on the board against ~4.7 us of compute, so the
+  *              single-polynomial top is ~88% overhead; one dispatch over
+  *              BATCH multiplies divides that by BATCH.
+  *
+  * Arguments:   - a, b: packed operands, polynomial n at words [n*8, n*8+8)
+  *              - r: packed results, same layout
+  **************************************************/
+  void poly_mul_batch(hls::burst_maxi<poly_word_t> a,
+                      hls::burst_maxi<poly_word_t> b,
+                      hls::burst_maxi<poly_word_t> r,
+                      unsigned batch_count) {
+    /* Clamp before an AXI request, so even a bad caller can't make
+       this kernel access beyond its synthesized maximum */
+    unsigned count = batch_count;
+    if (count < 1)
+      count = 1;
+    else if (count > POLY_MUL_MAX_BATCH)
+      count = POLY_MUL_MAX_BATCH;
+
+    #pragma HLS DATAFLOW
+    hls::stream<poly_word_t> sa, sb, sr;
+    /* Deep enough to cover a memory round trip without stalling the compute
+       stage; 32 words is 4 polynomials of slack per operand. */
+    #pragma HLS STREAM variable=sa depth=32
+    #pragma HLS STREAM variable=sb depth=32
+    #pragma HLS STREAM variable=sr depth=32
+
+    read_all(a, sa, count);
+    read_all(b, sb, count);
+    compute_all(sa, sb, sr, count);
+    write_all(r, sr, count);
   }
