@@ -241,7 +241,6 @@
   // Pointwise multiply in the NTT domain; result carries a factor of R^-1.
   // INLINE off only so it shows as its own module in the synthesis report.
   void hls_poly_basemul(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    #pragma HLS INLINE off
     for (int i = 0; i < 64; i++) {
       // unroll 2 touches indices 8i..8i+7 per cycle: one element per bank, given
       // the caller's buffers are cyclic-8 partitioned
@@ -255,17 +254,27 @@
   
 
   void hls_poly_add(int16_t r[256], const int16_t a[256], const int16_t b[256]) {
-    for (int i = 0; i < 256; i++) r[i] = a[i] + b[i];
+    for (int i = 0; i < 256; i++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=8
+      r[i] = a[i] + b[i];
+    }
+  
   }
 
   void hls_poly_reduce(int16_t r[256]) {
-    for (int i = 0; i < 256; i++) r[i] = barrett_reduce(r[i]);
+    for (int i = 0; i < 256; i++) {
+      #pragma HLS PIPELINE II=1
+      #pragma HLS UNROLL factor=8
+      r[i] = barrett_reduce(r[i]);
+    }
   }
 
   void hls_polyvec_basemul_acc(int16_t r[256],
                                const int16_t a[KYBER_K][256],
                                const int16_t b[KYBER_K][256]) {
     int16_t t[256];
+    #pragma HLS ARRAY_PARTITION variable=t cyclic factor=8
     hls_poly_basemul(r, a[0], b[0]);
     for (int i = 1; i < KYBER_K; i++) {
       hls_poly_basemul(t, a[i], b[i]);
@@ -474,3 +483,8 @@
     compute_all(sa, sb, sr, count);
     write_all(r, sr, count);
   }
+
+void hls_poly_ntt(const int16_t in[256], int16_t out[256]) {
+    ntt(in, out);
+    hls_poly_reduce(out);
+}
