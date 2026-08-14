@@ -1,6 +1,6 @@
 # fpga-alfredV2
 
-### Hardware-Accelerated Number Theoretic Transform for Post-Quantum Cryptography
+## Project Overview: Number Theoretic Transform (NTT) Core Acceleration for PQC
 
 <div align="left">
  
@@ -9,8 +9,6 @@
 [![Scheme](https://img.shields.io/badge/Scheme-Kyber--768%20(ML--KEM)-2ea44f)](https://pq-crystals.org/kyber/)
  
 </div>
-
-## Project Overview: Number Theoretic Transform (NTT) Core Acceleration for PQC
 
 See [COMP4601 Initial Project Plan](https://github.com/Saitama909/fpga-alfredV2/blob/main/COMP4601%20Initial%20Project%20Plan-1.pdf)
 
