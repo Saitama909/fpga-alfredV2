@@ -2,9 +2,11 @@
 
 ## Project Overview: Number Theoretic Transform (NTT) Core Acceleration for PQC
 
+<div align="left">
 [Platform](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html)
 [Toolchain](https://www.amd.com/en/products/software/adaptive-socs-and-fpgas/vitis.html)
 [Scheme](https://pq-crystals.org/kyber/)
+<div>
 
 See [COMP4601 Initial Project Plan](https://github.com/Saitama909/fpga-alfredV2/blob/main/COMP4601%20Initial%20Project%20Plan-1.pdf)
 
