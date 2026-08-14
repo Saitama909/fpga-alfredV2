@@ -4,9 +4,9 @@
 
 <div align="left">
 
-[Platform](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html)
-[Toolchain](https://www.amd.com/en/products/software/adaptive-socs-and-fpgas/vitis.html)
-[Scheme](https://pq-crystals.org/kyber/)
+[![Platform](https://img.shields.io/badge/Platform-Kria%20KV260-e8710a?logo=amd&logoColor=white)](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html)
+[![Toolchain](https://img.shields.io/badge/Vitis%20HLS-2025.2-1a91da)](https://www.amd.com/en/products/software/adaptive-socs-and-fpgas/vitis.html)
+[![Scheme](<https://img.shields.io/badge/Scheme-Kyber--768%20(ML--KEM)-2ea44f>)](https://pq-crystals.org/kyber/)
 
 </div>
 
