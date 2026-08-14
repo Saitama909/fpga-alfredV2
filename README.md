@@ -2,8 +2,6 @@
 
 ## Project Overview: Number Theoretic Transform (NTT) Core Acceleration for PQC
 
-We present a system that accelerates the Number-Theoretic Transform at the heart of ML-KEM (Kyber-768) post-quantum key exchange on a Xilinx KV260, targeting the polynomial multiplication that dominates the scheme's runtime. A Vitis HLS kernel implements the full forward NTT, pointwise multiply and inverse NTT as a staged DATAFLOW pipeline at 200 MHz, batching up to 256 independent polynomial products into a single dispatch to amortise host–device overhead. Measured on hardware, the accelerator sustains roughly 4.15 million multiplies per second - 0.24 µs per product against 27.8 µs for the pq-crystals reference on the board's Cortex-A53 (@ max freq 1.33GHz, `-O3` optimised), a ~115x speedup. We also provided demonstrations of speedup of our core integrated into the encryption stage of Kyber, translating to a 6.81x kernel speedup, proving applicability and correctness.
-
 <div align="left">
 
 [![Platform](https://img.shields.io/badge/Platform-Kria%20KV260-e8710a?logo=amd&logoColor=white)](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html)
@@ -12,7 +10,9 @@ We present a system that accelerates the Number-Theoretic Transform at the heart
 
 </div>
 
-See [COMP4601 Initial Project Plan](https://github.com/Saitama909/fpga-alfredV2/blob/main/COMP4601%20Initial%20Project%20Plan-1.pdf)
+We present a system that accelerates the Number-Theoretic Transform at the heart of ML-KEM (Kyber-768) post-quantum key exchange on a Xilinx KV260, targeting the polynomial multiplication that dominates the scheme's runtime. A Vitis HLS kernel implements the full forward NTT, pointwise multiply and inverse NTT as a staged DATAFLOW pipeline at 200 MHz, batching up to 256 independent polynomial products into a single dispatch to amortise host–device overhead. Measured on hardware, the accelerator sustains roughly 4.15 million multiplies per second - 0.24 µs per product against 27.8 µs for the pq-crystals reference on the board's Cortex-A53 (@ max freq 1.33GHz, `-O3` optimised), a ~115x speedup. We also provided demonstrations of speedup of our core integrated into the encryption stage of Kyber, translating to a 6.81x kernel speedup, proving applicability and correctness.
+
+See [COMP4601 Final Project Presentation](https://github.com/Saitama909/fpga-alfredV2/blob/main/COMP4601%20Final%20Presentation.pdf)
 
 ## Repository
 
