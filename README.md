@@ -2,9 +2,7 @@
 
 ### Hardware-Accelerated Number Theoretic Transform for Post-Quantum Cryptography
 
-**Polynomial multiplication accelerator on the AMD Kria KV260 with Vitis HLS**
-
-<div align="center">
+<div align="left">
  
 [![Platform](https://img.shields.io/badge/Platform-Kria%20KV260-e8710a?logo=amd&logoColor=white)](https://www.amd.com/en/products/system-on-modules/kria/k26/kv260-vision-starter-kit.html)
 [![Toolchain](https://img.shields.io/badge/Vitis%20HLS-2025.2-1a91da)](https://www.amd.com/en/products/software/adaptive-socs-and-fpgas/vitis.html)
