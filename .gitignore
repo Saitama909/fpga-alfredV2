@@ -1,0 +1,8 @@
+/results
+/testing/logs
+/testing/outputs
+*__pycache__*
+/branch-tester/branches/
+/branch-tester/local-backup/
+/branch-tester/compare-summary.txt
+/riley-junk

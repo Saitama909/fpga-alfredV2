@@ -1,0 +1,27 @@
+# Comment out a line with # or set a RUN_* flag to 0 to disable that step.
+# Paths point at your Unified Vitis workspace / component (not this repo's hls/).
+
+# Vitis and component paths
+WORKSPACE_PATH=/home/riley/Desktop/COMP4601/project-repo
+COMPONENT_NAME=ntt_core
+VITIS_BIN_DIR=/home/riley/Xilinx/2025.2/Vitis/bin
+
+# Output shit ##############################################################
+# Hide lines that start with INFO: (WARNING/ERROR/PASS still shown)
+SUPPRESS_INFO_MESSAGES=1
+# Clear testing/logs and testing/outputs before each run
+PURGE_FOLDERS=1
+
+# Steps ######################################################################
+# Steps (1 = run, 0 = skip)
+RUN_CSIM=1
+RUN_CSYNTH=1
+RUN_COSIM=1
+RUN_COMPARE=1
+RUN_HW_BUILD=0
+
+# Resource utilisation bands ##################################################
+# (from C-synth: BRAM/DSP/FF/LUT/URAM)
+UTIL_WARN=70
+UTIL_HIGH=90
+UTIL_OVER=100
