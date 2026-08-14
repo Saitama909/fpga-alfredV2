@@ -15,8 +15,8 @@ static int16_t center_mod_q(int64_t x) {
   return (int16_t)r;
 }
 
-/* Smoke test: kernel runs and writes something other than the poison value.
-   Full correctness is checked on the board against the host schoolbook path. */
+// Smoke test: kernel runs and writes something other than the poison value.
+// Full correctness is checked on the board against the host schoolbook path.
 int main() {
   static int16_t A_T[KYBER_K][KYBER_K][256];
   static int16_t t_hat[KYBER_K][256];

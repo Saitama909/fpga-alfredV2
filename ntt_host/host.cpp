@@ -1,12 +1,11 @@
 /*
- * XRT host application for the kyber_enc_core kernel.
+ * XRT host for kyber_enc_core.
  *
- * Loads the xclbin, runs one Kyber IND-CPA encryption (the NTT-domain stage:
- * u = A^T.r + e1, v = t^T.r + e2 + m) on the PL, checks the result against a
- * software encryption computed on the A53, then profiles the two against each
- * other with the same timing code.
+ * Loads the xclbin, runs one Kyber IND-CPA encrypt on the PL
+ * (u = A^T.r + e1, v = t^T.r + e2 + m), checks it against the A53
+ * software path, then times both with the same clock.
  *
- * See docs/kyber_enc_verification.md for stimulus generation and accuracy checks.
+ * Stimulus / accuracy notes: docs/kyber_enc_verification.md
  */
 
 #include "cmdlineparser.h"
@@ -136,6 +135,7 @@ static void print_row(const char* label, const Timings& s) {
            s.mean_us, s.min_us, s.max_us, s.stddev_us);
 }
 
+// CBD-ish noise, eta=2.
 static void host_cbd(int16_t p[256]) {
     for (int i = 0; i < N; i++) {
         int acc = 0;
@@ -159,9 +159,9 @@ static void bind_args(xrt::run& run, xrt::bo& A, xrt::bo& t, xrt::bo& r,
 
 int main(int argc, char** argv) {
     sda::utils::CmdLineParser parser;
-    parser.addSwitch("--xclbin_file", "-x", "input binary file string", "");
+    parser.addSwitch("--xclbin_file", "-x", "path to the xclbin", "");
     parser.addSwitch("--device_id", "-d", "device index", "0");
-    parser.addSwitch("--iterations", "-n", "timed dispatches per series", "1000");
+    parser.addSwitch("--iterations", "-n", "timed runs per series", "1000");
     parser.parse(argc, argv);
 
     std::string binaryFile = parser.value("xclbin_file");
@@ -187,18 +187,18 @@ int main(int argc, char** argv) {
     xrt::device device;
     xrt::kernel krnl;
     try {
-        std::cout << "Open the device " << device_index << std::endl;
+        std::cout << "opening device " << device_index << std::endl;
         device = xrt::device(device_index);
-        std::cout << "Load the xclbin " << binaryFile << std::endl;
+        std::cout << "loading xclbin " << binaryFile << std::endl;
         auto uuid = device.load_xclbin(binaryFile);
-        std::cout << "Open the kernel " << KERNEL_NAME << std::endl;
+        std::cout << "opening kernel " << KERNEL_NAME << std::endl;
         krnl = xrt::kernel(device, uuid, KERNEL_NAME);
     } catch (const std::exception& e) {
         std::cerr << "XRT error: " << e.what() << "\n";
         return EXIT_FAILURE;
     }
 
-    std::cout << "Allocate Buffers in Global Memory\n";
+    std::cout << "allocating buffers\n";
     auto bo_A   = xrt::bo(device, KYBER_K * KYBER_K * POLY_BYTES, krnl.group_id(0));
     auto bo_t   = xrt::bo(device, KYBER_K * POLY_BYTES,           krnl.group_id(1));
     auto bo_r   = xrt::bo(device, KYBER_K * POLY_BYTES,           krnl.group_id(2));
@@ -249,10 +249,11 @@ int main(int argc, char** argv) {
     std::memcpy(h_e2,  e2_n,  POLY_BYTES);
     std::memcpy(h_msg, msg_n, POLY_BYTES);
 
+    // Poison outputs so a missed write is obvious.
     for (int i = 0; i < KYBER_K * N; i++) h_u[i] = 0x7fff;
     for (int i = 0; i < N; i++)           h_v[i] = 0x7fff;
 
-    std::cout << "synchronize input buffers to device global memory\n";
+    std::cout << "syncing inputs across to the device\n";
     bo_A.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     bo_t.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     bo_r.sync(XCL_BO_SYNC_BO_TO_DEVICE);
@@ -260,13 +261,13 @@ int main(int argc, char** argv) {
     bo_e2.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     bo_msg.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-    std::cout << "Execution of the kernel\n";
+    std::cout << "running the kernel\n";
     auto run = xrt::run(krnl);
     bind_args(run, bo_A, bo_t, bo_r, bo_e1, bo_e2, bo_msg, bo_u, bo_v);
     run.start();
     run.wait();
 
-    std::cout << "Get the output data from the device\n";
+    std::cout << "reading results back\n";
     bo_u.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
     bo_v.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
 
@@ -299,7 +300,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "*******************************************\n";
-    printf("PASS: u and v match the software encryption\n");
+    printf("PASS: u and v match the software encrypt\n");
     std::cout << "*******************************************\n";
 
     {
@@ -311,7 +312,7 @@ int main(int argc, char** argv) {
                 printf("FAIL: software baseline disagrees with schoolbook at %d\n", i);
                 return EXIT_FAILURE;
             }
-        std::cout << "software baseline verified against schoolbook product\n";
+        std::cout << "software mul matches schoolbook\n";
     }
 
     std::vector<double> hw_krnl_us, hw_e2e_us, sw_us;
@@ -319,6 +320,7 @@ int main(int argc, char** argv) {
     hw_e2e_us.reserve(num_trials);
     sw_us.reserve(num_trials);
 
+    // Warm-up so the first timed run isn't the cold one.
     for (int t = 0; t < 50; t++) { run.start(); run.wait(); }
 
     for (int t = 0; t < num_trials; t++) {
@@ -343,7 +345,7 @@ int main(int argc, char** argv) {
         hw_e2e_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
     }
 
-    /* Dispatch fit: total(k) ≈ overhead + k * device_time */
+    // Fit total(k) ≈ overhead + k * device_time so we can split XRT vs device.
     const int ks[] = {1, 2, 4, 8, 16};
     double t_k[5];
     for (int ki = 0; ki < 5; ki++) {
@@ -421,10 +423,8 @@ int main(int argc, char** argv) {
     Timings hw_pipe = compute_stats(hw_pipe_us);
     Timings sw      = compute_stats(sw_us);
 
-    printf("\n===== kyber_enc_core: %d trials per series, K = %d =====\n",
-           num_trials, KYBER_K);
-    printf("  all times are PER ENCRYPTION (%d polynomial products each)\n",
-           KYBER_K * (KYBER_K + 1));
+    printf("\n===== kyber_enc_core: %d trials per series, K = %d =====\n", num_trials, KYBER_K);
+    printf("  all times are PER ENCRYPTION (%d polynomial products each)\n", KYBER_K * (KYBER_K + 1));
     printf("  %-22s %9s %9s %9s %9s %9s\n", "", "median", "mean", "min", "max", "stddev");
     printf("  %-22s %9s %9s %9s %9s %9s\n", "", "(us)", "(us)", "(us)", "(us)", "(us)");
     print_row("hardware (kernel)", hw_krnl);
@@ -433,28 +433,20 @@ int main(int argc, char** argv) {
     print_row("software (A53)", sw);
 
     printf("\n  --- speedup vs software ---\n");
-    printf("  speedup, kernel only  (median): %6.2fx\n",
-           sw.median_us / hw_krnl.median_us);
-    printf("  speedup, pipelined    (median): %6.2fx   (depth %d)\n",
-           sw.median_us / hw_pipe.median_us, DEPTH);
-    printf("  speedup, end-to-end   (median): %6.2fx\n",
-           sw.median_us / hw_e2e.median_us);
+    printf("  speedup, kernel only  (median): %6.2fx\n", sw.median_us / hw_krnl.median_us);
+    printf("  speedup, pipelined    (median): %6.2fx   (depth %d)\n", sw.median_us / hw_pipe.median_us, DEPTH);
+    printf("  speedup, end-to-end   (median): %6.2fx\n", sw.median_us / hw_e2e.median_us);
 
     printf("\n  --- throughput ---\n");
-    printf("  FPGA pipelined:                 %8.0f encryptions/s\n",
-           1.0e6 / hw_pipe.median_us);
-    printf("  FPGA end-to-end:                %8.0f encryptions/s\n",
-           1.0e6 / hw_e2e.median_us);
-    printf("  software (A53):                 %8.0f encryptions/s\n",
-           1.0e6 / sw.median_us);
+    printf("  FPGA pipelined:                 %8.0f encryptions/s\n", 1.0e6 / hw_pipe.median_us);
+    printf("  FPGA end-to-end:                %8.0f encryptions/s\n", 1.0e6 / hw_e2e.median_us);
+    printf("  software (A53):                 %8.0f encryptions/s\n", 1.0e6 / sw.median_us);
 
     printf("\n  --- detail ---\n");
     printf("  device time (dispatch fit):     %8.2f us/encryption\n", device_us);
     printf("  fixed XRT overhead (fit):       %8.2f us\n", overhead_us);
-    printf("  sync overhead (e2e - kernel):   %8.2f us\n",
-           hw_e2e.median_us - hw_krnl.median_us);
-    printf("  pipelining gain over serial:    %6.2fx\n",
-           hw_krnl.median_us / hw_pipe.median_us);
+    printf("  sync overhead (e2e - kernel):   %8.2f us\n", hw_e2e.median_us - hw_krnl.median_us);
+    printf("  pipelining gain over serial:    %6.2fx\n", hw_krnl.median_us / hw_pipe.median_us);
     printf("====================================================================\n");
 
     return EXIT_SUCCESS;

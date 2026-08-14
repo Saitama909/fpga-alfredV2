@@ -6,8 +6,8 @@
 #include "params.h"
 #include "ntt_top.h"
 
-/* William's original cyclic-8. ENC_MEM_PAR=16 met HLS but missed P&R by
-   ~0.19 ns on the w→vl path; 8 cuts fanout/routing enough to close timing. */
+// Wills original cyclic-8. ENC_MEM_PAR=16 met HLS but missed P&R by ~0.19 ns on the w→vl path
+// 8 cuts fanout/routing enough to close timing.
 static const int ENC_MEM_PAR = 8;
 
 static void copy_poly(const int16_t in[256], int16_t out[256]) {

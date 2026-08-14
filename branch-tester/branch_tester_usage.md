@@ -1,18 +1,24 @@
-# Branch-tester flags
+# Branch tester
 
-Run from the repo root:
+## What is this?
+
+It pulls `hls/src` from remote branches for the repo (plus optional local), runs the usual test harness on each one, then puts your tree back. Was useful for comparing pass/fail, timing, and utilisation side by side against everyones progress all at once.
+
+## WIP
+
+This file was always a work in progress and was designed moreso to quickly compare performance and utilisation between branches. It's far from finished but it was super helpful and I would have liked to had more time to develop a more extensive and less cluttered single-file testbench. -Riley.
+
+## How to run?.
+
+From the repo root:
 
 ```bash
 python3 branch-tester/run_branch_tests.py [flags]
 ```
 
-With **no flags**, the tool runs the full flow for every branch in
-`branch-tester/config.json` → `test_branches`.
+No flags = full run for whatever's listed in `branch-tester/config.json` → `test_branches`.
 
-Special entry **`"local"`**: not a remote. Snapshots your current `hls/src`
-(via `local-backup`) into `branches/local/`, runs the harness on it, and
-includes a `local` column in `--compare`. Omit `"local"` from the config to
-skip WIP testing. You can also force it with:
+`"local"` isn't a remote. It snapshots your current `hls/src` (via `local-backup`) into `branches/local/`, runs the harness on it, and shows up as a column in `--compare`. Leave it out of the config if you don't want WIP tested. Or just force it:
 
 ```bash
 python3 branch-tester/run_branch_tests.py --run-branch local
@@ -20,34 +26,32 @@ python3 branch-tester/run_branch_tests.py --run-branch local
 
 ---
 
-## Full-run modifiers
+## `--force`
 
-### `--force`
-
-Re-run tests for every config branch even when:
+Re-runs every config branch even when:
 
 - the remote commit still matches the local snapshot in `info.txt`, **and**
-- `branches/<name>/outputs/run-summary.txt` already exists
+- `branches/<name>/outputs/run-summary.txt` is already there
 
-Without `--force`, those branches are skipped
+Without `--force` those get skipped.
 
 ```bash
 python3 branch-tester/run_branch_tests.py --force
 ```
 
-#### Note
-
-Currently this only works on a **full config run** and not with the exclusive flags below. But can make it work in future if people want that.
+Only works on a full config run at the moment, not with the exclusive flags below. Easy enough to add later if anyone wants it.
 
 ---
 
 ## Exclusive modes
 
+These don't mix with each other (or with `--force`).
+
 ### `--run-branch NAME`
 
-Force **re-fetch + re-archive + re-test** a single remote branch (ignores `test_branches` in the config, except you still need a valid remote name).
+Re-fetch, re-archive, and re-test one remote branch. Ignores `test_branches` in the config, you still need a real remote name.
 
-Always re-archives `hls/src` and always runs `testing/run_tests.py` for that branch, then restores local `hls/src` from `local-backup`.
+Always archives `hls/src` and always runs `testing/run_tests.py` for that branch, then puts local `hls/src` back from `local-backup`.
 
 ```bash
 python3 branch-tester/run_branch_tests.py --run-branch jovan-mvp
@@ -55,7 +59,7 @@ python3 branch-tester/run_branch_tests.py --run-branch jovan-mvp
 
 ### `--list-remote`
 
-`git fetch --prune origin`, then print all remote branch short names.
+`git fetch --prune origin`, then print the remote branch short names.
 
 ```bash
 python3 branch-tester/run_branch_tests.py --list-remote
@@ -63,28 +67,26 @@ python3 branch-tester/run_branch_tests.py --list-remote
 
 ### `--compare`
 
-See the output/comparing of multiple branches at once.
+Side-by-side tables of the branch results.
 
-**File matches**: rows are files under each branch’s `hls/src`. Cells show an 8-char content hash (`-` if missing). Identical hashes share a colour and unique hashes stay uncoloured. Basically just trying to show which files are the same between branches.
+**File matches:** one row per file under each branch's `hls/src`. Cells are an 8-char content hash (`-` if it's missing). Same hash = same colour, unique ones stay plain. Just so you can see which files match across branches.
 
-With 2+ branches, best (lowest latency / interval / util) is green and worst is red. Cosim latency and interval are taken from `cosim-summary.txt` when present.
+With 2+ branches, best (lowest latency / interval / util) is green and worst is red. Cosim latency and interval come from `cosim-summary.txt` when it's there.
 
-Also writes a plain copy to `branch-tester/compare-summary.txt`.
+Also dumps a plain copy to `branch-tester/compare-summary.txt`.
 
-By default only **config** `test_branches` appear as columns. Pass `--all` to include every local snapshot under `branch-tester/branches/`.
+Default columns are just the config `test_branches`. Pass `--all` to include every snapshot under `branch-tester/branches/`.
 
 ```bash
 python3 branch-tester/run_branch_tests.py --compare
 python3 branch-tester/run_branch_tests.py --compare --all
 ```
 
-Before each branch’s `testing/run_tests.py` run, the tool wipes the shared Vitis work_dir `hls/{sim,syn,csim}` cache so RTL/cosim cannot reuse stale artifacts across branch source swaps.
+Before each `testing/run_tests.py` run we chuck the shared Vitis work_dir `hls/{sim,syn,csim}` cache so RTL/cosim doesn't reuse stale artefacts from the last branch.
 
 ### `--restore`
 
-Incase something effs up, or you cancel the run while its operating, use the following command to automatically restore your work from before the test ran.
-
-Rewrite local `hls/src` file **contents** from `branch-tester/local-backup/` symlink-safe; does not replace files/inodes).
+In case something stuffs up, or you cancel mid-run, this puts your `hls/src` back from `branch-tester/local-backup/`. Writes through the existing paths (symlink-safe atm so it doesn't replace files/inodes making Vitis sometimes very angry).
 
 ```bash
 python3 branch-tester/run_branch_tests.py --restore
@@ -92,7 +94,7 @@ python3 branch-tester/run_branch_tests.py --restore
 
 ### `--delete-local`
 
-Prompt `Y/N`, then delete `branch-tester/branches/` (recreates an empty folder). Does **not** delete `local-backup/`.
+Asks first, then deletes `branch-tester/branches/` and recreates an empty folder. Leaves `local-backup/` alone.
 
 ```bash
 python3 branch-tester/run_branch_tests.py --delete-local

@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 
-# Usage:
+# Flags / examples: see branch_tester_usage.md
 #   python3 branch-tester/run_branch_tests.py
 #   python3 branch-tester/run_branch_tests.py --force
-#   python3 branch-tester/run_branch_tests.py --run-branch NAME
-#   python3 branch-tester/run_branch_tests.py --run-branch local
-#   python3 branch-tester/run_branch_tests.py --restore
-#   python3 branch-tester/run_branch_tests.py --compare
-#   python3 branch-tester/run_branch_tests.py --compare --all
-#   python3 branch-tester/run_branch_tests.py --delete-local
-#   python3 branch-tester/run_branch_tests.py --list-remote
+#   python3 branch-tester/run_branch_tests.py --run-branch NAME   # or 'local'
 
 from __future__ import annotations
 
@@ -26,8 +20,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
-##### Config Paths ############################################################
-# Can modify these if you want to change paths to different directories.
+# Paths — change these if you move stuff around.
 CONFIG_PATH = HERE / "config.json"
 BRANCHES_DIR = HERE / "branches"
 BACKUP_DIR = HERE / "local-backup"
@@ -37,17 +30,16 @@ TEST_CONFIG = ROOT / "testing" / "config.txt"
 TEST_LOGS = ROOT / "testing" / "logs"
 TEST_OUTS = ROOT / "testing" / "outputs"
 COMPARE_OUT = HERE / "compare-summary.txt"
-# Special config entry: test WIP from local-backup (not a remote branch).
+# "local" in the config = test WIP from local-backup, not a remote.
 LOCAL_BRANCH = "local"
-###############################################################################
 
-##### Colours stuff for the print/branches at the end #########################
+# Colours for the compare tables at the end.
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 BLUE = "\033[34m"
 RESET = "\033[0m"
-# Distinct colours for file-match SAME groups (different groups ≠ same colour).
+# Same content-hash group → same colour. Different groups shouldn't match.
 SAME_COLOURS = [
     "\033[36m",  # cyan
     "\033[35m",  # magenta
@@ -60,7 +52,6 @@ SAME_COLOURS = [
     "\033[91m",  # bright red
     "\033[33m",  # yellow
 ]
-###############################################################################
 
 
 def colour(text: str, code: str) -> str:
@@ -118,9 +109,8 @@ def list_remote_branches() -> list[str]:
             names.append(line[len("origin/") :])
     return sorted(set(names))
 
-
+# Tip of origin/<branch>. Used to skip the archive if nothing's moved.
 def remote_tip(branch: str) -> tuple[str, str]:
-    """Return (full_sha, commit_date_iso) for origin/<branch>."""
     ref = f"origin/{branch}"
     sha = run_git(["rev-parse", ref]).stdout.strip()
     date = run_git(["log", "-1", "--format=%cI", ref]).stdout.strip()
@@ -161,9 +151,8 @@ def write_info(
         )
     )
 
-
+# Hash of everything under an hls/src tree — skip if local WIP hasn't moved.
 def src_content_hash(src_dir: Path) -> str:
-    """Stable hash of all files under an hls/src tree (for local WIP skip detection)."""
     h = hashlib.sha256()
     for rel in sorted(iter_rel_files(src_dir)):
         h.update(rel.encode())
@@ -183,7 +172,7 @@ def iter_rel_files(root: Path) -> set[str]:
     return out
 
 
-# Rewrite file contents in place (follows symlinks). Never replaces the path.
+# Write through the path (follows symlinks, doesn't replace the inode).
 def write_through(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
@@ -199,12 +188,9 @@ def copy_dir_contents(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst)
 
 
-##### Phase A: Fetch and archive remote branches ##############################
-def fetch_and_archive(
-    wanted: list[str], force_archive: bool = False
+# Fetch remotes and archive hls/src. Returns (archived, skipped, missing, selected).
+def fetch_and_archive(wanted: list[str], force_archive: bool = False
 ) -> tuple[list[str], list[str], list[str], list[str]]:
-    # Returns (archived, skipped_unchanged, missing, selected).
-    # If force_archive is True, always re-archive even when commit matches.
     print("Fetching origin...")
     run_git(["fetch", "--prune", "origin"])
 
@@ -284,7 +270,7 @@ def fetch_and_archive(
     return archived, skipped, missing, selected
 
 
-##### Phase B: Backup and restore local hls/src ###############################
+# Backup / restore local hls/src
 def backup_local_src() -> None:
     if BACKUP_DIR.exists():
         shutil.rmtree(BACKUP_DIR)
@@ -295,7 +281,7 @@ def backup_local_src() -> None:
         src = LOCAL_SRC / rel
         dst = BACKUP_DIR / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        # Read through symlink; write a normal backup file
+        # Read through the symlink, write a normal file into the backup.
         dst.write_text(
             src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8"
         )
@@ -325,8 +311,7 @@ def restore_local_src() -> int:
     return 0
 
 
-# Snapshot local-backup into branches/local/hls/src.
-# Returns True if a usable snapshot exists (archived or reused).
+# Copy local-backup into branches/local/hls/src. True if we've got something usable.
 def prepare_local_snapshot(force_archive: bool = False) -> bool:
     if not BACKUP_DIR.is_dir() or not any(BACKUP_DIR.rglob("*")):
         print(colour("WARNING  local-backup empty; cannot test 'local'", YELLOW))
@@ -380,10 +365,7 @@ def local_matches_snapshot() -> bool:
     return sha == src_content_hash(BACKUP_DIR)
 
 
-##### Phase C: Apply branch sources to local hls/src ##########################
-# Swap matched file contents into local hls/src. Returns False if user declines after unmatched warning.
-
-
+# Drop branch sources onto local hls/src. False if they bail after the unmatched-files warning.
 def apply_branch_sources(branch: str) -> bool:
     safe = safe_name(branch)
     branch_src = BRANCHES_DIR / safe / "hls" / "src"
@@ -429,7 +411,7 @@ def _parse_testing_config() -> dict[str, str]:
     return vals
 
 
-# Resolve Vitis component work_dir (e.g. .../ntt_core/fqmul) from testing/config.txt.
+# work_dir from testing/config.txt (e.g. .../ntt_core/fqmul)
 def resolve_vitis_work_dir() -> Path | None:
     vals = _parse_testing_config()
     ws = vals.get("WORKSPACE_PATH")
@@ -454,7 +436,7 @@ def resolve_vitis_work_dir() -> Path | None:
     return comp_dir / work_name
 
 
-# Wipe shared Vitis HLS sim/syn/csim so branch swaps cannot reuse stale RTL.
+# Chuck the shared Vitis sim/syn/csim cache so we don't reuse stale RTL across branches.
 def clean_vitis_hls_cache() -> None:
     work = resolve_vitis_work_dir()
     if work is None or not work.is_dir():
@@ -487,7 +469,7 @@ def run_tests_for_branch(branch: str) -> int:
     return proc.returncode
 
 
-def collect_artifacts(branch: str) -> None:
+def collect_artefacts(branch: str) -> None:
     safe = safe_name(branch)
     dest = BRANCHES_DIR / safe
     copy_dir_contents(TEST_LOGS, dest / "logs")
@@ -527,7 +509,7 @@ def full_run(wanted: list[str], force: bool = False) -> int:
                 print(colour("WARNING  skipping local WIP tests", YELLOW))
                 want_local = False
 
-        # Preserve config order; only remotes that were selected (+ local).
+        # Keep config order — remotes we actually found, plus local if they asked.
         selected_set = set(selected)
         to_test = [
             b for b in wanted if (b == LOCAL_BRANCH and want_local) or b in selected_set
@@ -556,7 +538,7 @@ def full_run(wanted: list[str], force: bool = False) -> int:
             if rc != 0:
                 failed = True
                 print(colour(f"WARNING  run_tests exited {rc} for {branch}", YELLOW))
-            collect_artifacts(branch)
+            collect_artefacts(branch)
     finally:
         print("\nRestoring local hls/src from backup...")
         restore_local_src()
@@ -564,7 +546,7 @@ def full_run(wanted: list[str], force: bool = False) -> int:
     return 1 if failed else 0
 
 
-##### Compare branch outputs/run-summary.txt tables ############################
+# Compare branch outputs/run-summary.txt tables
 def parse_run_summary(path: Path) -> dict:
     text = path.read_text(errors="replace")
     data = {
@@ -636,16 +618,15 @@ def parse_run_summary(path: Path) -> dict:
 def _parse_lat_num(val: str) -> float | None:
     if not val or val == "-":
         return None
-    # Prefer the last number so "448 to 448" / "471 to 480" use the max (csynth max).
+    # Last number so ranges like "471 to 480" use the max.
     nums = re.findall(r"\d+(?:\.\d+)?", val)
     if not nums:
         return None
     return float(nums[-1])
 
 
-# Prefer lat_max / ii_max from outputs/cosim-summary.txt when present.
-# Also fill module_ii from csynth-summary.txt if run-summary lacked them.
-def _enrich_cosim_from_summary(branch_dir: Path, data: dict) -> None:
+# Pull lat_max/ii_max from cosim-summary if we've got it; backfill module_ii from csynth if needed.
+def _fill_in_cosim(branch_dir: Path, data: dict) -> None:
     path = branch_dir / "outputs" / "cosim-summary.txt"
     if path.is_file():
         for line in path.read_text(errors="replace").splitlines():
@@ -674,7 +655,7 @@ def _enrich_cosim_from_summary(branch_dir: Path, data: dict) -> None:
             data["module_ii"] = mods
 
 
-# Map relative path → md5 for files under branches/<name>/hls/src.
+# Rel path → md5 for files under branches/<name>/hls/src.
 def _hls_src_file_hashes(branch_dir: Path) -> dict[str, str]:
     src = branch_dir / "hls" / "src"
     out: dict[str, str] = {}
@@ -701,9 +682,8 @@ def _colour_extremes(values: dict[str, float | None], cell: str, branch: str) ->
         return colour(cell, RED)
     return cell
 
-
+# Shorten names for the table header (full name stays the key).
 def _header_name(name: str, max_len: int = 15) -> str:
-    """Truncate branch names for table headers (full name still used as key)."""
     return name if len(name) <= max_len else name[:max_len]
 
 
@@ -722,7 +702,7 @@ def mode_compare(show_all: bool = False) -> int:
         info = read_info(d / "info.txt")
         name = info.get("branch", d.name)
         data = parse_run_summary(summary)
-        _enrich_cosim_from_summary(d, data)
+        _fill_in_cosim(d, data)
         rows.append((name, data))
         name_to_dir[name] = d
 
@@ -752,7 +732,7 @@ def mode_compare(show_all: bool = False) -> int:
 
     names = [n for n, _ in rows]
     headers = [_header_name(n) for n in names]
-    # Column width fits data cells ("448 to 448") and truncated headers.
+    # Wide enough for "448 to 448" and the shortened headers.
     width = max(15, max(len(h) for h in headers))
 
     plain_lines = ["Branch compare", f"time={now_iso()}", ""]
@@ -761,7 +741,7 @@ def mode_compare(show_all: bool = False) -> int:
         print(line)
         plain_lines.append(re.sub(r"\033\[[0-9;]*m", "", line))
 
-    ##### Summary table
+    # Summary table
     emit("Summary (pass/fail)")
     step_keys = []
     for _, data in rows:
@@ -788,13 +768,13 @@ def mode_compare(show_all: bool = False) -> int:
                 )
             else:
                 cells.append(f"{st:>{width}}")
-        # plain version without colour for file
+        # Same row without colour codes, for the file.
         plain_cells = [f"{data['steps'].get(step, '-'):>{width}}" for _, data in rows]
         print(f"  {step:<16}" + "".join(f" {c}" for c in cells))
         plain_lines.append(f"  {step:<16}" + "".join(f" {c}" for c in plain_cells))
     emit("")
 
-    ##### Timing table
+    # Timing table
     emit("Timing")
     timing_keys = [
         ("clock_target", "clock target"),
@@ -822,7 +802,7 @@ def mode_compare(show_all: bool = False) -> int:
         print(f"  {label:<16}" + "".join(f" {c}" for c in coloured))
         plain_lines.append(f"  {label:<16}" + "".join(f" {c}" for c in plain_cells))
 
-    # Δ = cosim − csynth (highlights when measured RTL exceeds HLS estimate)
+    # delta = cosim - csynth (handy when measured RTL is worse than the HLS estimate)
     delta_raw = {}
     delta_nums = {}
     for n, data in rows:
@@ -841,7 +821,7 @@ def mode_compare(show_all: bool = False) -> int:
         cell = f"{delta_raw[n]:>{width}}"
         plain_cells.append(cell)
         if len(rows) > 1 and delta_nums.get(n) is not None:
-            # lower (more negative / smaller) is better
+            # lower is better
             coloured.append(_colour_extremes(delta_nums, cell, n))
         else:
             coloured.append(cell)
@@ -851,7 +831,7 @@ def mode_compare(show_all: bool = False) -> int:
     )
     emit("")
 
-    ##### Module intervals (per DATAFLOW instance)
+    # Module intervals (per DATAFLOW instance)
     emit("Module intervals (csynth ii)")
     mod_keys = []
     for _, data in rows:
@@ -883,7 +863,7 @@ def mode_compare(show_all: bool = False) -> int:
             )
     emit("")
 
-    ##### Usage table
+    # Usage table
     emit("Usage (% util)")
     resources = ["BRAM", "DSP", "FF", "LUT", "URAM"]
     emit(f"  {'resource':<16}" + "".join(f" {h:>{width}}" for h in headers))
@@ -914,7 +894,7 @@ def mode_compare(show_all: bool = False) -> int:
         plain_lines.append(f"  {res:<16}" + "".join(f" {c}" for c in plain_cells))
     emit("")
 
-    ##### File matches (content hash; same hash are the same colour)
+    # File matches — same hash gets the same colour.
     emit("File matches")
     file_maps: dict[str, dict[str, str]] = {}
     all_files: list[str] = []
@@ -927,7 +907,7 @@ def mode_compare(show_all: bool = False) -> int:
                 all_files.append(rel)
     all_files.sort()
 
-    # Short ids used in the table; colour keyed by id so identical numbers match.
+    # Short hash ids; same id → same colour.
     def short_id(h: str) -> str:
         return h[:8]
 
@@ -1001,7 +981,7 @@ def mode_list_remote() -> int:
     return 0
 
 
-# Force re-archive + re-test a single remote branch (or local WIP).
+# Re-archive + re-test one branch (or local WIP).
 def mode_run_branch(branch: str) -> int:
     if branch == LOCAL_BRANCH:
         print(f"Single-branch run: {LOCAL_BRANCH} (snapshot local-backup + tests)")
@@ -1019,7 +999,7 @@ def mode_run_branch(branch: str) -> int:
                 print(
                     colour(f"WARNING  run_tests exited {rc} for {LOCAL_BRANCH}", YELLOW)
                 )
-            collect_artifacts(LOCAL_BRANCH)
+            collect_artefacts(LOCAL_BRANCH)
         finally:
             print("\nRestoring local hls/src from backup...")
             restore_local_src()
@@ -1040,7 +1020,7 @@ def mode_run_branch(branch: str) -> int:
         if rc != 0:
             failed = True
             print(colour(f"WARNING  run_tests exited {rc} for {branch}", YELLOW))
-        collect_artifacts(branch)
+        collect_artefacts(branch)
     finally:
         print("\nRestoring local hls/src from backup...")
         restore_local_src()
@@ -1048,20 +1028,19 @@ def mode_run_branch(branch: str) -> int:
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="Cross-branch HLS source tester")
+    p = argparse.ArgumentParser(description="Run HLS tests across a few branches")
     p.add_argument(
         "--force",
         action="store_true",
-        help="re-run tests even if remote commit is unchanged and results already exist",
+        help="re-run even if the remote commit hasn't changed and results already exist",
     )
     p.add_argument(
         "--run-branch",
         metavar="NAME",
-        help="force re-fetch and re-test a single remote branch "
-        "(or 'local' for WIP from local-backup)",
+        help="re-fetch and re-test one remote branch (or 'local' for WIP from local-backup)",
     )
     p.add_argument(
-        "--restore", action="store_true", help="restore local hls/src from local-backup"
+        "--restore", action="store_true", help="put local hls/src back from local-backup"
     )
     p.add_argument(
         "--compare",
@@ -1071,10 +1050,10 @@ def parse_args(argv=None):
     p.add_argument(
         "--all",
         action="store_true",
-        help="with --compare, include every local branch snapshot (default: config only)",
+        help="with --compare, include every local snapshot (default is config only)",
     )
     p.add_argument(
-        "--delete-local", action="store_true", help="purge branch-tester/branches/"
+        "--delete-local", action="store_true", help="wipe branch-tester/branches/"
     )
     p.add_argument(
         "--list-remote", action="store_true", help="fetch and list remote branches"
