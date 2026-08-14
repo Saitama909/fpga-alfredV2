@@ -87,10 +87,10 @@
   **************************************************/
   static int16_t fqmul(int16_t a, int16_t b) {
     #pragma HLS INLINE
-    // latency=1 splits the multiply over two cycles to shorten the critical
-    // path and meet timing.
+    // latency=2 registers the DSP inputs as well as its output, so the BRAM
+    // read and the multiply no longer share a cycle.
     int32_t p = (int32_t)a*b;
-    #pragma HLS BIND_OP variable=p op=mul impl=dsp latency=1
+    #pragma HLS BIND_OP variable=p op=mul impl=dsp latency=2
     return montgomery_reduce(p);
   }
 
