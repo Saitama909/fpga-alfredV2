@@ -1,4 +1,4 @@
-# fpga-alfredV2
+# NTT core acceleration for post-quantum cryptography on FPGA
 
 ## Project Overview: Number Theoretic Transform (NTT) Core Acceleration for PQC
 
